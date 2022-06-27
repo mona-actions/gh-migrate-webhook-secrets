@@ -1,4 +1,4 @@
-module github.com/samueljmello/gh-migrate-webhooks
+module github.com/samueljmello/gh-clone-webhooks
 
 go 1.18
 
