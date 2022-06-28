@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -23,6 +25,8 @@ var (
 
 	// Set up main variables
 	noCache             = false
+	confirmProceed      = false
+	autoProceed         = false
 	sourceHostname      string
 	sourceOrg           string
 	destinationHostname string
@@ -117,6 +121,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&destinationHostname, "destination-hostname", "github.com", "Destination GitHub hostname.")
 	rootCmd.PersistentFlags().StringVar(&destinationOrg, "destination-org", "", "Destination organization name")
 	rootCmd.PersistentFlags().BoolVar(&noCache, "disable-cache", false, "Disable cache for GitHub API requests.")
+	rootCmd.PersistentFlags().BoolVar(&confirmProceed, "confirm", false, "Auto respond to confirmation prompt.")
+	rootCmd.PersistentFlags().BoolVar(&autoProceed, "auto-proceed", false, "Proceed regardless of errors.")
 }
 
 // Main function, calls Cobra
@@ -131,6 +137,27 @@ func ExitOnError(err error) {
 	if err != nil {
 		rootCmd.PrintErrln(red(err.Error()))
 		os.Exit(1)
+	}
+}
+
+func askForConfirmation(s string) bool {
+	reader := bufio.NewReader(os.Stdin)
+
+	for {
+		fmt.Printf("%s [y/n]: ", s)
+
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		response = strings.ToLower(strings.TrimSpace(response))
+
+		if response == "y" || response == "yes" {
+			return true
+		} else if response == "n" || response == "no" {
+			return false
+		}
 	}
 }
 
@@ -206,9 +233,9 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// set the end cursor for the page we are on
 		variables["page"] = &orgRepositoriesQuery.Organization.Repositories.PageInfo.EndCursor
 	}
-	sp.Stop()
 
 	// set up table header for displaying of data
+	sp.Suffix = fmt.Sprintf(" creating table data for display.")
 	var td = pterm.TableData{
 		{"Repository", "ID", "URL", "Active", "Content Type", "Events"},
 	}
@@ -229,7 +256,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// query for the webhooks on this repository
 		err = restClient.Get("repos/"+repo.NameWithOwner+"/hooks", &webhooksResponse)
 		if err != nil {
-			sp.Stop()
 			return err
 		}
 
@@ -266,14 +292,26 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	pterm.DefaultTable.WithHasHeader().WithHeaderRowSeparator("-").WithData(td).Render()
 	fmt.Println()
 
+	// confirm the executor wants to proceed
+	if !confirmProceed {
+		c := askForConfirmation("Do you want to clone all webhooks to org " + destinationHostname + "/" + destinationOrg + "?")
+		if !c {
+			fmt.Println()
+			fmt.Println("Process exited.")
+			return err
+		}
+		fmt.Println()
+	}
+
 	// point REST client to destination
 	opts.Host = destinationHostname
 	restClient, _ = gh.RESTClient(&opts)
 
-	sp.Start()
+	sp.Restart()
 	sp.Suffix = fmt.Sprintf("Beginning cloning of Webhooks...")
 
 	// loop through all webhooks
+	var success = 0
 	for _, webhook := range webhooks {
 
 		// output what's current processing
@@ -323,15 +361,39 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// post the request
 		webhookResponse := Webhook{}
 		err = restClient.Post("repos/"+destinationOrg+"/"+webhook.Repository+"/hooks", reader, &webhookResponse)
+
+		// validate the request worked.
 		if err != nil {
+
+			// stop and output the error
 			sp.Stop()
-			return err
+			fmt.Println(red(err))
+			fmt.Println()
+
+			// if autoproceed is not enabled, prompt user
+			if !autoProceed {
+				c := askForConfirmation("Do you want to proceed?")
+				fmt.Println()
+				if !c {
+					fmt.Println("Process exited.")
+					os.Exit(1)
+				}
+			}
+
+			// restart the spinner
+			sp.Start()
+		} else {
+			// update success count.
+			success++
 		}
 
 		// sleep for 1 second to avoid rate limiting
 		time.Sleep(1 * time.Second)
 	}
 	sp.Stop()
+
+	// send back result to user
+	fmt.Println("Webhook cloning completed. " + strconv.Itoa(success) + " webhooks cloned.")
 
 	return err
 }
