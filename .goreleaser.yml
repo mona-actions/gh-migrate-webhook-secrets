@@ -1,4 +1,4 @@
-project_name: gh_report
+project_name: gh_clone_webhooks
 
 release:
   prerelease: auto
