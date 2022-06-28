@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -30,6 +32,7 @@ var (
 	hiBlack = color.New(color.FgHiBlack).SprintFunc()
 	red     = color.New(color.FgRed).SprintFunc()
 	green   = color.New(color.FgGreen).SprintFunc()
+	cyan    = color.New(color.FgCyan).SprintFunc()
 	sp      = spinner.New(spinner.CharSets[14], 40*time.Millisecond)
 
 	// set up clients
@@ -101,34 +104,19 @@ type Webhook struct {
 		Insecure_SSL string
 		URL          string
 		Secret       string
+		Token        string
+		Digest       string
 	}
 }
 
 // Initialization function. Only happens once regardless of import.
 func init() {
-
-	// initialize with the config
-	cobra.OnInitialize(initConfig)
-
 	// declare flags available to executor
 	rootCmd.PersistentFlags().StringVar(&sourceHostname, "source-hostname", "github.com", "Source GitHub hostname.")
 	rootCmd.PersistentFlags().StringVar(&sourceOrg, "source-org", "", "Source organization name.")
 	rootCmd.PersistentFlags().StringVar(&destinationHostname, "destination-hostname", "github.com", "Destination GitHub hostname.")
 	rootCmd.PersistentFlags().StringVar(&destinationOrg, "destination-org", "", "Destination organization name")
 	rootCmd.PersistentFlags().BoolVar(&noCache, "disable-cache", false, "Disable cache for GitHub API requests.")
-}
-
-// Initialization configuration
-func initConfig() {
-
-	opts := api.ClientOptions{
-		Host:        sourceHostname,
-		EnableCache: !noCache,
-		CacheTTL:    time.Hour,
-	}
-
-	restClient, _ = gh.RESTClient(&opts)
-	graphqlClient, _ = gh.GQLClient(&opts)
 }
 
 // Main function, calls Cobra
@@ -149,6 +137,16 @@ func ExitOnError(err error) {
 // GetUses returns GitHub Actions used in workflows
 func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
+	// set up API clients
+	opts := api.ClientOptions{
+		Host:        sourceHostname,
+		EnableCache: !noCache,
+		CacheTTL:    time.Hour,
+	}
+
+	restClient, _ = gh.RESTClient(&opts)
+	graphqlClient, _ = gh.GQLClient(&opts)
+
 	r, _ := regexp.Compile("^http(s|)://")
 
 	if r.MatchString(sourceHostname) {
@@ -164,8 +162,10 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		return fmt.Errorf("A destination organization must be provided.")
 	}
 
-	fmt.Println("Source: " + sourceHostname + "/" + sourceOrg)
-	fmt.Println("Destination: " + destinationHostname + "/" + destinationOrg)
+	fmt.Println()
+	fmt.Println(cyan("Source: ") + sourceHostname + "/" + sourceOrg)
+	fmt.Println(cyan("Destination: ") + destinationHostname + "/" + destinationOrg)
+	fmt.Println()
 
 	variables := map[string]interface{}{
 		"owner": graphql.String(sourceOrg),
@@ -206,11 +206,14 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// set the end cursor for the page we are on
 		variables["page"] = &orgRepositoriesQuery.Organization.Repositories.PageInfo.EndCursor
 	}
+	sp.Stop()
 
-	// Loop through repositories and get webhooks
+	// set up table header for displaying of data
 	var td = pterm.TableData{
 		{"Repository", "ID", "URL", "Active", "Content Type", "Events"},
 	}
+
+	// Loop through repositories and get webhooks
 	webhooks := []Webhook{}
 	for _, repo := range repositories {
 
@@ -226,12 +229,17 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// query for the webhooks on this repository
 		err = restClient.Get("repos/"+repo.NameWithOwner+"/hooks", &webhooksResponse)
 		if err != nil {
+			sp.Stop()
 			return err
 		}
 
-		// add the repo name as a property on the webhook (for later use)
+		// add the webhooks to the table data for visibility
 		for i, webhook := range webhooksResponse {
-			webhooksResponse[i].Repository = repo.Name
+			// add the repo name the webhook
+			webhook.Repository = repo.Name
+			// overwrite the webhook at the index in the array
+			webhooksResponse[i] = webhook
+			// add to table data
 			td = append(td, []string{
 				repo.Name,
 				strconv.Itoa(webhook.ID),
@@ -242,7 +250,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			})
 		}
 
-		// merge the list of arrays
+		// append to the list of webooks
 		webhooks = append(webhooks, webhooksResponse...)
 
 		// sleep for 1 second to avoid rate limiting
@@ -253,8 +261,77 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	sp.Stop()
 
 	// show the results
+	fmt.Println(cyan("Webhooks Found: "))
+	fmt.Println()
 	pterm.DefaultTable.WithHasHeader().WithHeaderRowSeparator("-").WithData(td).Render()
-	// fmt.Println(webhooks)
+	fmt.Println()
+
+	// point REST client to destination
+	opts.Host = destinationHostname
+	restClient, _ = gh.RESTClient(&opts)
+
+	sp.Start()
+	sp.Suffix = fmt.Sprintf("Beginning cloning of Webhooks...")
+
+	// loop through all webhooks
+	for _, webhook := range webhooks {
+
+		// output what's current processing
+		sp.Suffix = fmt.Sprintf(
+			" creating webhook to %s in repository %s",
+			webhook.Config.URL,
+			webhook.Repository,
+		)
+
+		// set up the encoding reader from the current webhook
+		type configBlock struct {
+			URL          string `json:"url"`
+			Content_Type string `json:"content_type"`
+			Insecure_SSL string `json:"insecure_ssl"`
+			Secret       string `json:"secret"`
+			Token        string `json:"token"`
+			Digest       string `json:"digest"`
+		}
+		type webhookPayload struct {
+			Name   string      `json:"name"`
+			Config configBlock `json:"config"`
+			Events []string    `json:"events"`
+			Active bool        `json:"active"`
+		}
+		var webhookToCreate = webhookPayload{
+			Name: webhook.Name,
+			Config: configBlock{
+				URL:          webhook.Config.URL,
+				Content_Type: webhook.Config.Content_Type,
+				Insecure_SSL: webhook.Config.Insecure_SSL,
+				Secret:       "value-from-vault",
+				Token:        webhook.Config.Token,
+				Digest:       webhook.Config.Digest,
+			},
+			Events: webhook.Events,
+			Active: webhook.Active,
+		}
+
+		// convert the struct to io.reader
+		data, err := json.Marshal(&webhookToCreate)
+		if err != nil {
+			sp.Stop()
+			return err
+		}
+		reader := bytes.NewReader(data)
+
+		// post the request
+		webhookResponse := Webhook{}
+		err = restClient.Post("repos/"+destinationOrg+"/"+webhook.Repository+"/hooks", reader, &webhookResponse)
+		if err != nil {
+			sp.Stop()
+			return err
+		}
+
+		// sleep for 1 second to avoid rate limiting
+		time.Sleep(1 * time.Second)
+	}
+	sp.Stop()
 
 	return err
 }
