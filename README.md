@@ -34,3 +34,6 @@ Flags:
       --source-org string             Source organization name.
   -v, --version                       version for gh-clone-webhooks
 ```
+
+## Notes
+- Does NOT support copying secrets.
