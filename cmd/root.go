@@ -363,7 +363,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			webhook.Config.URL,
 			webhook.Repository,
 		)
-		webhookSecret, err := GetVaultSecret("secret_key_in_vault")
+		webhookSecret, err := GetVaultSecret(webhook.Repository)
 		if err != nil {
 			sp.Stop()
 			fmt.Println()
