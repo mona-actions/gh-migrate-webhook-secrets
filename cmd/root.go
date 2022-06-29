@@ -52,13 +52,12 @@ var (
 		RunE:    CloneWebhooks,
 	}
 
+	// set up graphql query for repos
 	orgRepositoriesQuery struct {
 		Organization struct {
 			Repositories Repos `graphql:"repositories(first: 100, after: $page, orderBy: {field: NAME, direction: ASC})"`
 		} `graphql:"organization(login: $owner)"`
 	}
-
-	repositories []Repository
 )
 
 type Organization struct {
@@ -74,43 +73,29 @@ type Repos struct {
 }
 
 type Repository struct {
-	Name             string
-	NameWithOwner    string
-	Owner            Organization
-	Description      string
-	URL              string
-	Visibility       string
-	IsArchived       bool
-	IsTemplate       bool
-	DefaultBranchRef struct {
-		Name string
-	}
-	HasIssuesEnabled   bool
-	HasProjectsEnabled bool
-	HasWikiEnabled     bool
-	IsFork             bool
-	ForkCount          int
-	ForkingAllowed     bool
-	DiskUsage          int
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	Name          string
+	NameWithOwner string
+	Owner         Organization
+	Description   string
+	URL           string
+}
+
+type WebHookConfig struct {
+	URL          string `json:"url"`
+	Content_Type string `json:"content_type"`
+	Insecure_SSL string `json:"insecure_ssl"`
+	Secret       string `json:"secret"`
+	Token        string `json:"token"`
+	Digest       string `json:"digest"`
 }
 
 type Webhook struct {
 	ID         int
 	Repository string
-	Type       string
-	Name       string
-	Active     bool
-	Events     []string
-	Config     struct {
-		Content_Type string
-		Insecure_SSL string
-		URL          string
-		Secret       string
-		Token        string
-		Digest       string
-	}
+	Name       string        `json:"name"`
+	Config     WebHookConfig `json:"config"`
+	Events     []string      `json:"events"`
+	Active     bool          `json:"active"`
 }
 
 // Initialization function. Only happens once regardless of import.
@@ -141,18 +126,16 @@ func ExitOnError(err error) {
 }
 
 func askForConfirmation(s string) bool {
+	// read the input
 	reader := bufio.NewReader(os.Stdin)
-
+	// loop until a response is valid
 	for {
 		fmt.Printf("%s [y/n]: ", s)
-
 		response, err := reader.ReadString('\n')
 		if err != nil {
 			log.Fatal(err)
 		}
-
 		response = strings.ToLower(strings.TrimSpace(response))
-
 		if response == "y" || response == "yes" {
 			return true
 		} else if response == "n" || response == "no" {
@@ -161,21 +144,41 @@ func askForConfirmation(s string) bool {
 	}
 }
 
-// GetUses returns GitHub Actions used in workflows
-func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
-
-	// set up API clients
+// sets up the API clients for GH
+func GetOpts(hostname string) (options api.ClientOptions) {
+	// set options
 	opts := api.ClientOptions{
 		Host:        sourceHostname,
 		EnableCache: !noCache,
 		CacheTTL:    time.Hour,
 	}
+	return opts
+}
 
-	restClient, _ = gh.RESTClient(&opts)
-	graphqlClient, _ = gh.GQLClient(&opts)
+// Looks up secrets in HashiCorp Vault
+func GetVaultSecret(key string) (secret string) {
+	// need to add logic here
+	return "stub"
+}
 
+// GetUses returns GitHub Actions used in workflows
+func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
+
+	// get clients set-up with the source org hostname
+	opts := GetOpts(sourceHostname)
+	restClient, restErr := gh.RESTClient(&opts)
+	if restErr != nil {
+		return restErr
+	}
+	graphqlClient, graphqlErr := gh.GQLClient(&opts)
+	if graphqlErr != nil {
+		return graphqlErr
+	}
+
+	// create a regex filter to make sure http(s) isn't added
 	r, _ := regexp.Compile("^http(s|)://")
 
+	// validate flags provided
 	if r.MatchString(sourceHostname) {
 		return fmt.Errorf("Source hostname contains http(s) prefix and should not.")
 	}
@@ -189,11 +192,13 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		return fmt.Errorf("A destination organization must be provided.")
 	}
 
+	// print out some information about the process
 	fmt.Println()
 	fmt.Println(cyan("Source: ") + sourceHostname + "/" + sourceOrg)
 	fmt.Println(cyan("Destination: ") + destinationHostname + "/" + destinationOrg)
 	fmt.Println()
 
+	// get our variables set up for the graphql query
 	variables := map[string]interface{}{
 		"owner": graphql.String(sourceOrg),
 		"page":  (*graphql.String)(nil),
@@ -203,6 +208,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	sp.Start()
 
 	// Loop through pages of repositories, waiting 1 second in between
+	repositories := []Repository{}
 	var i = 1
 	for {
 
@@ -303,9 +309,16 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		fmt.Println()
 	}
 
-	// point REST client to destination
-	opts.Host = destinationHostname
-	restClient, _ = gh.RESTClient(&opts)
+	// get clients set-up with the destination org hostname
+	opts = GetOpts(destinationHostname)
+	restClient, restErr = gh.RESTClient(&opts)
+	if restErr != nil {
+		return restErr
+	}
+	graphqlClient, graphqlErr = gh.GQLClient(&opts)
+	if graphqlErr != nil {
+		return graphqlErr
+	}
 
 	sp.Restart()
 	sp.Suffix = fmt.Sprintf("Beginning cloning of Webhooks...")
@@ -322,27 +335,13 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		)
 
 		// set up the encoding reader from the current webhook
-		type configBlock struct {
-			URL          string `json:"url"`
-			Content_Type string `json:"content_type"`
-			Insecure_SSL string `json:"insecure_ssl"`
-			Secret       string `json:"secret"`
-			Token        string `json:"token"`
-			Digest       string `json:"digest"`
-		}
-		type webhookPayload struct {
-			Name   string      `json:"name"`
-			Config configBlock `json:"config"`
-			Events []string    `json:"events"`
-			Active bool        `json:"active"`
-		}
-		var webhookToCreate = webhookPayload{
+		var webhookToCreate = Webhook{
 			Name: webhook.Name,
-			Config: configBlock{
+			Config: WebHookConfig{
 				URL:          webhook.Config.URL,
 				Content_Type: webhook.Config.Content_Type,
 				Insecure_SSL: webhook.Config.Insecure_SSL,
-				Secret:       "value-from-vault",
+				Secret:       GetVaultSecret("secret_key_in_vault"),
 				Token:        webhook.Config.Token,
 				Digest:       webhook.Config.Digest,
 			},
@@ -393,7 +392,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	sp.Stop()
 
 	// send back result to user
-	fmt.Println("Webhook cloning completed. " + strconv.Itoa(success) + " webhooks cloned.")
+	fmt.Println("Successfully cloned " + strconv.Itoa(success) + " webhooks.")
 
 	return err
 }
