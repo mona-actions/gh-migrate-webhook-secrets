@@ -226,6 +226,8 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	fmt.Println(cyan("Destination: ") + destinationHostname + "/" + destinationOrg)
 	fmt.Println()
 
+	fmt.Println()
+
 	// get our variables set up for the graphql query
 	variables := map[string]interface{}{
 		"owner": graphql.String(sourceOrg),
