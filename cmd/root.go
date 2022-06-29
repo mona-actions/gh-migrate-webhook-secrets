@@ -163,7 +163,7 @@ func GetVaultSecret(key string) (secret string, err error) {
 
 	// detect if Vault token was provded. return empty string if not
 	vaultToken := os.Getenv("VAULT_TOKEN")
-	vaultServer := os.Getenv("VAULT_SERVER")
+	vaultServer := os.Getenv("VAULT_ADDR")
 	if vaultToken == "" || vaultServer == "" {
 		return "", err
 	}

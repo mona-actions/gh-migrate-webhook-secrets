@@ -10,7 +10,7 @@
 - Repositories must be present in both organizations (source and destination).
 
 - For Hashicorp Vault integration, the following environment variables must be set:
-  - `VAULT_SERVER`: The server address (including protocol and port) of your Vault server (_ex: https://192.168.0.1:8080_)
+  - `VAULT_ADDR`: The server address (including protocol and port) of your Vault server (_ex: https://192.168.0.1:8200_)
   - `VAULT_TOKEN`: The token to connect to your Vault server with.
 
 ## Install
