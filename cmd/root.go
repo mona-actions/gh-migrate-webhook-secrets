@@ -33,6 +33,7 @@ var (
 	sourceOrg           string
 	destinationHostname string
 	destinationOrg      string
+	vaultSecretKey      string
 
 	// Create some colors and a spinner
 	hiBlack = color.New(color.FgHiBlack).SprintFunc()
@@ -108,6 +109,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&sourceOrg, "source-org", "", "Source organization name.")
 	rootCmd.PersistentFlags().StringVar(&destinationHostname, "destination-hostname", "github.com", "Destination GitHub hostname.")
 	rootCmd.PersistentFlags().StringVar(&destinationOrg, "destination-org", "", "Destination organization name")
+	rootCmd.PersistentFlags().StringVar(&vaultSecretKey, "vault-secret-key", "", "The key in the Vault secret corresponding to the webhook secret value.")
+
 	rootCmd.PersistentFlags().BoolVar(&noCache, "no-cache", false, "Disable cache for GitHub API requests.")
 	rootCmd.PersistentFlags().BoolVar(&confirm, "confirm", false, "Auto respond to confirmation prompt.")
 	rootCmd.PersistentFlags().BoolVar(&ignoreErrors, "ignore-errors", false, "Proceed regardless of errors.")
@@ -186,7 +189,7 @@ func GetVaultSecret(key string) (secret string, err error) {
 	}
 
 	// need to add logic here
-	return secretResponse.Data["password"].(string), err
+	return secretResponse.Data[vaultSecretKey].(string), err
 }
 
 // GetUses returns GitHub Actions used in workflows
