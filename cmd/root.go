@@ -50,7 +50,7 @@ var (
 	rootCmd = &cobra.Command{
 		Use:          "gh-clone-webhooks",
 		Short:        "gh cli extension to clone webhooks",
-		Long:         `gh cli extension to clone webhooks from one org to another.`,
+		Long:         `gh cli extension to clone webhooks from one organization's repositories to another. Supports Hashicorp Vault for secrets retrieval.`,
 		Version:      "0.0.0-development",
 		SilenceUsage: true,
 		RunE:         CloneWebhooks,
@@ -167,7 +167,7 @@ func GetVaultSecret(key string) (secret string, err error) {
 	// detect if Vault token was provded. return empty string if not
 	vaultToken := os.Getenv("VAULT_TOKEN")
 	vaultServer := os.Getenv("VAULT_ADDR")
-	if vaultToken == "" || vaultServer == "" {
+	if vaultToken == "" || vaultServer == "" || vaultSecretKey == "" {
 		return "", err
 	}
 

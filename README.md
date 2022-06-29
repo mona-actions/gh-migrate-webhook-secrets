@@ -12,6 +12,7 @@
 - For Hashicorp Vault integration, the following environment variables must be set:
   - `VAULT_ADDR`: The server address (including protocol and port) of your Vault server (_ex: https://192.168.0.1:8200_)
   - `VAULT_TOKEN`: The token to connect to your Vault server with.
+  - Additionally, the flag `--vault-secret-key`.
 
 ## Install
 
@@ -26,20 +27,21 @@ $ gh clone-webhooks [flags]
 ```
 
 ```txt
-gh cli extension to clone webhooks from one org to another.
+gh cli extension to clone webhooks from one organization's repositories to another. Supports Hashicorp Vault for secrets retrieval.
 
 Usage:
   gh-clone-webhooks [flags]
 
 Flags:
-      --auto-proceed                  Proceed regardless of errors.
       --confirm                       Auto respond to confirmation prompt.
       --destination-hostname string   Destination GitHub hostname. (default "github.com")
       --destination-org string        Destination organization name
-      --disable-cache                 Disable cache for GitHub API requests.
   -h, --help                          help for gh-clone-webhooks
+      --ignore-errors                 Proceed regardless of errors.
+      --no-cache                      Disable cache for GitHub API requests.
       --source-hostname string        Source GitHub hostname. (default "github.com")
       --source-org string             Source organization name.
+      --vault-secret-key string       The key in the Vault secret corresponding to the webhook secret value.
   -v, --version                       version for gh-clone-webhooks
 ```
 
