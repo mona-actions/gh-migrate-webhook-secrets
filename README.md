@@ -37,3 +37,4 @@ Flags:
 
 ## Notes
 - Does NOT support copying secrets.
+- Will eventually support query vault for secret values.
