@@ -183,6 +183,7 @@ func GetVaultSecret(key string) (secret string, err error) {
 	client.SetToken(vaultToken)
 
 	// Read a secret from the default mount path for KV v2 in dev mode, "secret"
+	// update to utilize v1 or v2
 	secretResponse, err := client.KVv2("secret").Get(context.Background(), key)
 	if err != nil {
 		return "", err
@@ -379,6 +380,10 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			webhook.Config.URL,
 			webhook.Repository,
 		)
+
+		// Add read to check for existing webhook
+
+		// choose wether to update webhook or create new
 
 		// set up the encoding reader from the current webhook
 		var webhookToCreate = Webhook{

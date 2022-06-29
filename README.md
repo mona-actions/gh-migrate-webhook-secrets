@@ -30,7 +30,7 @@ $ gh clone-webhooks [flags]
 gh cli extension to clone webhooks from one organization's repositories to another. Supports Hashicorp Vault for secrets retrieval.
 
 Usage:
-  gh-clone-webhooks [flags]
+  gh clone-webhooks [flags]
 
 Flags:
       --confirm                       Auto respond to confirmation prompt.
@@ -48,3 +48,9 @@ Flags:
 ## Notes
 - Does **NOT** copy enterprise or organizational webhooks.
 - Does **NOT** support copying secrets directly from GitHub.
+
+## Fixes To Add
+- Add "update or create" logic to webhook creation
+- Adjust vault secret retrieval for v1 with role id & mount point (`${MOUNT}/${produit}/${vault_token}`)
+- Adjust timing for API calls for scale (1 second delay is too long)
+- Add way to define access token (for apps)
