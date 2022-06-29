@@ -4,7 +4,9 @@ on:
   push:
     branches:
       - main
-      - feature/*
+      - feature/**
+      - hotfix/**
+      - defect/**
     paths-ignore:
       - '*.md'
   pull_request:
