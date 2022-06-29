@@ -36,5 +36,8 @@ Flags:
 ```
 
 ## Notes
-- Does NOT support copying secrets.
-- Will eventually support query vault for secret values.
+- Does **NOT** copy enterprise or organizational webhooks.
+- Only copies webhooks from reposorities within the defined organization.
+- Repos must exist in both organizations (does not copy the repository itself).
+- Does **NOT** support copying secrets.
+- Will eventually support querying Hashicorp Vault for secret values.

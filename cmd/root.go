@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"github.com/cli/go-gh"
 	"github.com/cli/go-gh/pkg/api"
 	"github.com/fatih/color"
+	vault "github.com/hashicorp/vault/api"
 	"github.com/pterm/pterm"
 	"github.com/shurcooL/graphql"
 	"github.com/spf13/cobra"
@@ -25,8 +27,8 @@ var (
 
 	// Set up main variables
 	noCache             = false
-	confirmProceed      = false
-	autoProceed         = false
+	confirm             = false
+	ignoreErrors        = false
 	sourceHostname      string
 	sourceOrg           string
 	destinationHostname string
@@ -45,11 +47,12 @@ var (
 
 	// Create the root cobra command
 	rootCmd = &cobra.Command{
-		Use:     "gh-clone-webhooks",
-		Short:   "gh cli extension to clone webhooks",
-		Long:    `gh cli extension to clone webhooks from one org to another.`,
-		Version: "0.0.0-development",
-		RunE:    CloneWebhooks,
+		Use:          "gh-clone-webhooks",
+		Short:        "gh cli extension to clone webhooks",
+		Long:         `gh cli extension to clone webhooks from one org to another.`,
+		Version:      "0.0.0-development",
+		SilenceUsage: true,
+		RunE:         CloneWebhooks,
 	}
 
 	// set up graphql query for repos
@@ -105,9 +108,9 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&sourceOrg, "source-org", "", "Source organization name.")
 	rootCmd.PersistentFlags().StringVar(&destinationHostname, "destination-hostname", "github.com", "Destination GitHub hostname.")
 	rootCmd.PersistentFlags().StringVar(&destinationOrg, "destination-org", "", "Destination organization name")
-	rootCmd.PersistentFlags().BoolVar(&noCache, "disable-cache", false, "Disable cache for GitHub API requests.")
-	rootCmd.PersistentFlags().BoolVar(&confirmProceed, "confirm", false, "Auto respond to confirmation prompt.")
-	rootCmd.PersistentFlags().BoolVar(&autoProceed, "auto-proceed", false, "Proceed regardless of errors.")
+	rootCmd.PersistentFlags().BoolVar(&noCache, "no-cache", false, "Disable cache for GitHub API requests.")
+	rootCmd.PersistentFlags().BoolVar(&confirm, "confirm", false, "Auto respond to confirmation prompt.")
+	rootCmd.PersistentFlags().BoolVar(&ignoreErrors, "ignore-errors", false, "Proceed regardless of errors.")
 }
 
 // Main function, calls Cobra
@@ -156,9 +159,34 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 }
 
 // Looks up secrets in HashiCorp Vault
-func GetVaultSecret(key string) (secret string) {
+func GetVaultSecret(key string) (secret string, err error) {
+
+	// detect if Vault token was provded. return empty string if not
+	vaultToken := os.Getenv("VAULT_TOKEN")
+	vaultServer := os.Getenv("VAULT_SERVER")
+	if vaultToken == "" || vaultServer == "" {
+		return "", err
+	}
+
+	// set up vault
+	vaultConfig := vault.DefaultConfig()
+	vaultConfig.Address = vaultServer
+	client, err := vault.NewClient(vaultConfig)
+	if err != nil {
+		return "", err
+	}
+
+	// authenticate
+	client.SetToken(vaultToken)
+
+	// Read a secret from the default mount path for KV v2 in dev mode, "secret"
+	secretResponse, err := client.KVv2("secret").Get(context.Background(), key)
+	if err != nil {
+		return "", err
+	}
+
 	// need to add logic here
-	return "stub"
+	return secretResponse.Data["password"].(string), err
 }
 
 // GetUses returns GitHub Actions used in workflows
@@ -299,7 +327,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	fmt.Println()
 
 	// confirm the executor wants to proceed
-	if !confirmProceed {
+	if !confirm {
 		c := askForConfirmation("Do you want to clone all webhooks to org " + destinationHostname + "/" + destinationOrg + "?")
 		if !c {
 			fmt.Println()
@@ -327,6 +355,19 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	var success = 0
 	for _, webhook := range webhooks {
 
+		// try to get the webhook secret value from Vault
+		sp.Suffix = fmt.Sprintf(
+			" getting secret for webhook %s in repository %s",
+			webhook.Config.URL,
+			webhook.Repository,
+		)
+		webhookSecret, err := GetVaultSecret("secret_key_in_vault")
+		if err != nil {
+			sp.Stop()
+			fmt.Println()
+			return err
+		}
+
 		// output what's current processing
 		sp.Suffix = fmt.Sprintf(
 			" creating webhook to %s in repository %s",
@@ -341,7 +382,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 				URL:          webhook.Config.URL,
 				Content_Type: webhook.Config.Content_Type,
 				Insecure_SSL: webhook.Config.Insecure_SSL,
-				Secret:       GetVaultSecret("secret_key_in_vault"),
+				Secret:       webhookSecret,
 				Token:        webhook.Config.Token,
 				Digest:       webhook.Config.Digest,
 			},
@@ -370,7 +411,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			fmt.Println()
 
 			// if autoproceed is not enabled, prompt user
-			if !autoProceed {
+			if !ignoreErrors {
 				c := askForConfirmation("Do you want to proceed?")
 				fmt.Println()
 				if !c {
