@@ -14,4 +14,4 @@ jobs:
 
       - uses: cli/gh-extension-precompile@v1
         with:
-          go_version: 1.18.x
+          go_version: 1.17.x
