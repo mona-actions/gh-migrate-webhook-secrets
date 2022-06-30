@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -34,6 +35,7 @@ var (
 	destinationHostname string
 	destinationOrg      string
 	vaultMountpoint     string
+	vaultValueKey       string
 	vaultKvv1           = false
 
 	// Create some colors and a spinner
@@ -49,7 +51,7 @@ var (
 
 	// Create the root cobra command
 	rootCmd = &cobra.Command{
-		Use:          "gh-clone-webhooks",
+		Use:          "gh clone-webhooks",
 		Short:        "gh cli extension to clone webhooks",
 		Long:         `gh cli extension to clone webhooks from one organization's repositories to another. Supports Hashicorp Vault for secrets retrieval.`,
 		Version:      "0.0.0-development",
@@ -103,6 +105,11 @@ type Webhook struct {
 	Active     bool          `json:"active"`
 }
 
+type VaultAppRoleLogin struct {
+	RoleID   string `json:"role_id"`
+	SecretID string `json:"secret_id"`
+}
+
 // Initialization function. Only happens once regardless of import.
 func init() {
 
@@ -113,7 +120,8 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&destinationOrg, "destination-org", "", "Destination organization name")
 
 	// vault flags
-	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "", "The key in the Vault secret corresponding to the webhook secret value.")
+	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "", "The mount point of the secrets")
+	rootCmd.PersistentFlags().StringVar(&vaultValueKey, "vault-value-key", "secret", "The key in the Vault secret corresponding to the webhook secret value.")
 	rootCmd.PersistentFlags().BoolVar(&vaultKvv1, "vault-kvv1", false, "Use Vault KVv1 instead of KVv2.")
 
 	// boolean switches
@@ -167,13 +175,44 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 	return opts
 }
 
+// Gets an auth token from VAULT_ROLE_ID and VAULT_SECRET_ID
+func AuthUser(vaultClient *vault.Client, roleId string, secretId string) (string, error) {
+	// step: create the token request
+	request := vaultClient.NewRequest("POST", "/v1/auth/approle/login")
+	login := VaultAppRoleLogin{
+		SecretID: secretId,
+		RoleID:   roleId,
+	}
+
+	if err := request.SetJSONBody(login); err != nil {
+		return "", err
+	}
+
+	// step: make the request
+	resp, err := vaultClient.RawRequest(request)
+	if err != nil {
+		return "", err
+	}
+
+	defer resp.Body.Close()
+
+	// step: parse and return auth
+	secret, err := vault.ParseSecret(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return secret.Auth.ClientToken, nil
+}
+
 // Looks up secrets in HashiCorp Vault
 func GetVaultSecret(key string) (secret string, err error) {
 
-	// detect if Vault token was provded. return empty string if not
-	vaultToken := os.Getenv("VAULT_TOKEN")
+	// get Vault server address
 	vaultServer := os.Getenv("VAULT_ADDR")
-	if vaultToken == "" || vaultServer == "" || vaultMountpoint == "" {
+
+	// skip this step if VAULT_ADDR isn't provided
+	if vaultServer == "" {
 		return "", err
 	}
 
@@ -185,23 +224,47 @@ func GetVaultSecret(key string) (secret string, err error) {
 		return "", err
 	}
 
+	// Get security credentials
+	vaultToken := os.Getenv("VAULT_TOKEN")
+	vaultRoleId := os.Getenv("VAULT_ROLE_ID")
+	vaultSecretId := os.Getenv("VAULT_SECRET_ID")
+
+	if vaultRoleId != "" && vaultSecretId != "" {
+		vaultToken, err = AuthUser(client, vaultRoleId, vaultSecretId)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	// validate a token exists
+	if vaultToken == "" {
+		return "", errors.New(
+			"No valid authentication was provided. Either 'VAULT_TOKEN' or  'VAULT_ROLE_ID' and 'VAULT_SECRET_ID' must be defined.",
+		)
+	}
+
 	// authenticate
 	client.SetToken(vaultToken)
 
+	// add trailing slash to mountpoint if it's not provided
+	if vaultMountpoint != "" && !strings.HasSuffix(vaultMountpoint, "/") {
+		vaultMountpoint += "/"
+	}
+
 	if vaultKvv1 {
 		// query using kvv1
-		kvv1Response, err := client.KVv1("secret").Get(context.Background(), key)
+		kvv1Response, err := client.KVv1("secret").Get(context.Background(), vaultMountpoint+key)
 		if err != nil {
 			return "", err
 		}
-		return kvv1Response.Data[vaultMountpoint].(string), err
+		return kvv1Response.Data[vaultValueKey].(string), err
 	} else {
 		// query using kvv2
-		kvv2Response, err := client.KVv2("secret").Get(context.Background(), key)
+		kvv2Response, err := client.KVv2("secret").Get(context.Background(), vaultMountpoint+key)
 		if err != nil {
 			return "", err
 		}
-		return kvv2Response.Data[vaultMountpoint].(string), err
+		return kvv2Response.Data[vaultValueKey].(string), err
 	}
 }
 
