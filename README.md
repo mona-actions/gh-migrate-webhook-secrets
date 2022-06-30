@@ -11,8 +11,13 @@
 
 - For Hashicorp Vault integration, the following environment variables must be set:
   - `VAULT_ADDR`: The server address (including protocol and port) of your Vault server (_ex: https://192.168.0.1:8200_)
-  - `VAULT_TOKEN`: The token to connect to your Vault server with.
-  - Additionally, the flag `--vault-secret-key`.
+  - To authenticate with a token:
+    - `VAULT_TOKEN`: The token to connect to your Vault server with.
+  - To authenticate with Role ID and Secret ID (will take preference if both are provided):
+    - `VAULT_ROLE_ID`
+    - `VAULT_SECRET_ID`
+-   Flags to be set:
+  - `--vault-mountpoint`: The mount point of the secrets database on Vault
 
 ## Install
 
