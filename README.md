@@ -50,7 +50,8 @@ Flags:
 - Does **NOT** support copying secrets directly from GitHub.
 
 ## Fixes To Add
-- Add "update or create" logic to webhook creation
-- Adjust vault secret retrieval for v1 with role id & mount point (`${MOUNT}/${produit}/${vault_token}`)
-- Adjust timing for API calls for scale (1 second delay is too long)
-- Add way to define access token (for apps)
+- [ ] Add "update or create" logic to webhook creation
+- [ ] Adjust vault secret retrieval for v1 with role id & mount point (`${MOUNT}/${produit}/${vault_token}`)
+- [ ] Adjust timing for API calls for scale (1 second delay is too long)
+- [ ] Add way to define access token (for apps)
+- [ ] Update flags to better match other tooling (gh-migrate-deploy-hooks)
