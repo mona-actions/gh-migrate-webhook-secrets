@@ -1,4 +1,4 @@
-# gh-webhook-migrator
+# gh-migrate-webhooks
 
 [![build](https://github.com/mona-actions/gh-clone-webhooks/actions/workflows/build.yaml/badge.svg)](https://github.com/mona-actions/gh-clone-webhooks/actions/workflows/build.yaml) 
 [![release](https://github.com/mona-actions/gh-clone-webhooks/actions/workflows/release.yaml/badge.svg)](https://github.com/mona-actions/gh-clone-webhooks/actions/workflows/release.yaml)
@@ -25,20 +25,20 @@
 ## Install
 
 ```bash
-$ gh extension install mona-actions/gh-webhook-migrator
+$ gh extension install mona-actions/gh-migrate-webhooks
 ```
 
 ## Usage
 
 ```txt
-$ gh webhook-migrator [flags]
+$ gh migrate-webhooks [flags]
 ```
 
 ```txt
 GitHub CLI extension to migrate webhooks and their secrets. Supports idempotency, cloning from a source org to destination org, and querying HashiCorp Vault for secrets.
 
 Usage:
-  gh webhook-migrator [flags]
+  gh migrate-webhooks [flags]
 
 Flags:
       --confirm                       Auto respond to confirmation prompt
