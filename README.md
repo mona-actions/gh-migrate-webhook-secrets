@@ -17,7 +17,9 @@
     - `VAULT_ROLE_ID`
     - `VAULT_SECRET_ID`
 -   Flags to be set:
-  - `--vault-mountpoint`: The mount point of the secrets database on Vault
+  - `--vault-mountpoint`: The mount point of the secrets database on Vault.
+  - `--vault-value-key`: The corresponding key for the value of the secret stored.
+  - `--vault-kvv1`: If you need to use Vault KVv1, add this switch.
 
 ## Install
 
@@ -38,16 +40,18 @@ Usage:
   gh clone-webhooks [flags]
 
 Flags:
-      --confirm                       Auto respond to confirmation prompt.
-      --destination-hostname string   Destination GitHub hostname. (default "github.com")
+      --confirm                       Auto respond to confirmation prompt
+      --destination-hostname string   Destination GitHub hostname (default "github.com")
       --destination-org string        Destination organization name
-  -h, --help                          help for gh-clone-webhooks
-      --ignore-errors                 Proceed regardless of errors.
-      --no-cache                      Disable cache for GitHub API requests.
+  -h, --help                          help for gh
+      --ignore-errors                 Proceed regardless of errors
+      --no-cache                      Disable cache for GitHub API requests
       --source-hostname string        Source GitHub hostname. (default "github.com")
-      --source-org string             Source organization name.
-      --vault-secret-key string       The key in the Vault secret corresponding to the webhook secret value.
-  -v, --version                       version for gh-clone-webhooks
+      --source-org string             Source organization name
+      --vault-kvv1                    Use Vault KVv1 instead of KVv2
+      --vault-mountpoint string       The mount point of the secrets database, prefixes the --vault-value-key flag
+      --vault-value-key string        The key in the Vault secret corresponding to the webhook secret value. (default "secret")
+  -v, --version                       version for gh
 ```
 
 ## Notes
