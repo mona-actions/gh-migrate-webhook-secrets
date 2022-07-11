@@ -1,7 +1,7 @@
 # gh-migrate-webhooks
 
-[![build](https://github.com/mona-actions/gh-clone-webhooks/actions/workflows/build.yaml/badge.svg)](https://github.com/mona-actions/gh-clone-webhooks/actions/workflows/build.yaml) 
-[![release](https://github.com/mona-actions/gh-clone-webhooks/actions/workflows/release.yaml/badge.svg)](https://github.com/mona-actions/gh-clone-webhooks/actions/workflows/release.yaml)
+[![build](https://github.com/mona-actions/gh-migrate-webhooks/actions/workflows/build.yaml/badge.svg)](https://github.com/mona-actions/gh-migrate-webhooks/actions/workflows/build.yaml) 
+[![release](https://github.com/mona-actions/gh-migrate-webhooks/actions/workflows/release.yaml/badge.svg)](https://github.com/mona-actions/gh-migrate-webhooks/actions/workflows/release.yaml)
 
 > GitHub CLI extension to migrate webhooks and their secrets. Supports idempotency, cloning from a source org to destination org, and querying HashiCorp Vault for secrets.
 
