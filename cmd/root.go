@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -33,7 +34,10 @@ var (
 	sourceOrg           string
 	destinationHostname string
 	destinationOrg      string
-	vaultSecretKey      string
+	vaultMountpoint     string
+	vaultValueKey       string
+	vaultKvv1           = false
+	vaultTest           = false
 
 	// Create some colors and a spinner
 	hiBlack = color.New(color.FgHiBlack).SprintFunc()
@@ -48,10 +52,10 @@ var (
 
 	// Create the root cobra command
 	rootCmd = &cobra.Command{
-		Use:          "gh-clone-webhooks",
-		Short:        "gh cli extension to clone webhooks",
-		Long:         `gh cli extension to clone webhooks from one organization's repositories to another. Supports Hashicorp Vault for secrets retrieval.`,
-		Version:      "0.0.0-development",
+		Use:          "gh migrate-webhooks",
+		Short:        "GitHub CLI extension to migrate webhooks and their secrets",
+		Long:         `GitHub CLI extension to migrate webhooks and their secrets. Supports idempotency, cloning from a source org to destination org, and querying HashiCorp Vault for secrets.`,
+		Version:      "0.0.9-development",
 		SilenceUsage: true,
 		RunE:         CloneWebhooks,
 	}
@@ -102,18 +106,30 @@ type Webhook struct {
 	Active     bool          `json:"active"`
 }
 
+type VaultAppRoleLogin struct {
+	RoleID   string `json:"role_id"`
+	SecretID string `json:"secret_id"`
+}
+
 // Initialization function. Only happens once regardless of import.
 func init() {
-	// declare flags available to executor
-	rootCmd.PersistentFlags().StringVar(&sourceHostname, "source-hostname", "github.com", "Source GitHub hostname.")
-	rootCmd.PersistentFlags().StringVar(&sourceOrg, "source-org", "", "Source organization name.")
-	rootCmd.PersistentFlags().StringVar(&destinationHostname, "destination-hostname", "github.com", "Destination GitHub hostname.")
-	rootCmd.PersistentFlags().StringVar(&destinationOrg, "destination-org", "", "Destination organization name")
-	rootCmd.PersistentFlags().StringVar(&vaultSecretKey, "vault-secret-key", "", "The key in the Vault secret corresponding to the webhook secret value.")
 
-	rootCmd.PersistentFlags().BoolVar(&noCache, "no-cache", false, "Disable cache for GitHub API requests.")
-	rootCmd.PersistentFlags().BoolVar(&confirm, "confirm", false, "Auto respond to confirmation prompt.")
-	rootCmd.PersistentFlags().BoolVar(&ignoreErrors, "ignore-errors", false, "Proceed regardless of errors.")
+	// base flags
+	rootCmd.PersistentFlags().StringVar(&sourceHostname, "source-hostname", "github.com", "Source GitHub hostname")
+	rootCmd.PersistentFlags().StringVar(&sourceOrg, "source-org", "", "Source organization name")
+	rootCmd.PersistentFlags().StringVar(&destinationHostname, "destination-hostname", "github.com", "Destination GitHub hostname")
+	rootCmd.PersistentFlags().StringVar(&destinationOrg, "destination-org", "", "Destination organization name")
+
+	// vault flags
+	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "", "The mount point of the secrets, prefixes the --vault-value-key flag")
+	rootCmd.PersistentFlags().StringVar(&vaultValueKey, "vault-value-key", "secret", "The key in the Vault secret corresponding to the webhook secret value")
+	rootCmd.PersistentFlags().BoolVar(&vaultKvv1, "vault-kvv1", false, "Use Vault KVv1 instead of KVv2")
+	rootCmd.PersistentFlags().BoolVar(&vaultTest, "vault-test", false, "Test Vault connection")
+
+	// boolean switches
+	rootCmd.PersistentFlags().BoolVar(&noCache, "no-cache", false, "Disable cache for GitHub API requests")
+	rootCmd.PersistentFlags().BoolVar(&confirm, "confirm", false, "Auto respond to confirmation prompt")
+	rootCmd.PersistentFlags().BoolVar(&ignoreErrors, "ignore-errors", false, "Proceed regardless of errors")
 }
 
 // Main function, calls Cobra
@@ -161,40 +177,137 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 	return opts
 }
 
-// Looks up secrets in HashiCorp Vault
-func GetVaultSecret(key string) (secret string, err error) {
-
-	// detect if Vault token was provded. return empty string if not
-	vaultToken := os.Getenv("VAULT_TOKEN")
-	vaultServer := os.Getenv("VAULT_ADDR")
-	if vaultToken == "" || vaultServer == "" || vaultSecretKey == "" {
+// Gets an auth token from VAULT_ROLE_ID and VAULT_SECRET_ID
+func AuthUser(vaultClient *vault.Client, roleId string, secretId string) (string, error) {
+	// step: create the token request
+	request := vaultClient.NewRequest("POST", "/v1/auth/approle/login")
+	login := VaultAppRoleLogin{
+		SecretID: secretId,
+		RoleID:   roleId,
+	}
+	if err := request.SetJSONBody(login); err != nil {
 		return "", err
+	}
+
+	// step: make the request
+	resp, err := vaultClient.RawRequest(request)
+	if err != nil {
+		return "", err
+	}
+
+	defer resp.Body.Close()
+
+	// step: parse and return auth
+	secret, err := vault.ParseSecret(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return secret.Auth.ClientToken, err
+}
+
+func GetVaultToken(client *vault.Client) (token string, err error) {
+
+	// Get security credentials from environment
+	vaultToken := os.Getenv("VAULT_TOKEN")
+	vaultRoleId := os.Getenv("VAULT_ROLE_ID")
+	vaultSecretId := os.Getenv("VAULT_SECRET_ID")
+
+	// determine if we should auth with role id and secret id
+	if vaultRoleId != "" && vaultSecretId != "" {
+		vaultToken, err = AuthUser(client, vaultRoleId, vaultSecretId)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	// validate a token exists
+	if vaultToken == "" {
+		err = errors.New(
+			"No valid authentication was provided. Either 'VAULT_TOKEN' or  'VAULT_ROLE_ID' & 'VAULT_SECRET_ID' must be defined.",
+		)
+	}
+	return vaultToken, err
+}
+
+func GetVaultClient() (client *vault.Client, err error) {
+
+	// get Vault server address
+	vaultServer := os.Getenv("VAULT_ADDR")
+
+	// skip this step if VAULT_ADDR isn't provided
+	if vaultServer == "" {
+		return nil, err
 	}
 
 	// set up vault
 	vaultConfig := vault.DefaultConfig()
 	vaultConfig.Address = vaultServer
-	client, err := vault.NewClient(vaultConfig)
+	client, err = vault.NewClient(vaultConfig)
+	if err != nil {
+		return nil, err
+	}
+	return client, err
+}
+
+// Looks up secrets in HashiCorp Vault
+func GetVaultSecret(key string) (secret string, err error) {
+
+	// Get the Vault client. If no vault client and no errors were returned, skip this step
+	vaultClient, err := GetVaultClient()
+	if vaultClient == nil && err == nil {
+		return "", err
+	}
+
+	// get the token
+	vaultToken, err := GetVaultToken(vaultClient)
 	if err != nil {
 		return "", err
 	}
 
 	// authenticate
-	client.SetToken(vaultToken)
+	vaultClient.SetToken(vaultToken)
 
-	// Read a secret from the default mount path for KV v2 in dev mode, "secret"
-	// update to utilize v1 or v2
-	secretResponse, err := client.KVv2("secret").Get(context.Background(), key)
-	if err != nil {
-		return "", err
+	// add trailing slash to mountpoint if it's not provided
+	if vaultMountpoint != "" && !strings.HasSuffix(vaultMountpoint, "/") {
+		vaultMountpoint += "/"
 	}
 
-	// need to add logic here
-	return secretResponse.Data[vaultSecretKey].(string), err
+	if vaultKvv1 {
+		// query using kvv1
+		kvv1Response, err := vaultClient.KVv1("secret").Get(context.Background(), vaultMountpoint+key)
+		if err != nil {
+			return "", err
+		}
+		return kvv1Response.Data[vaultValueKey].(string), err
+	} else {
+		// query using kvv2
+		kvv2Response, err := vaultClient.KVv2("secret").Get(context.Background(), vaultMountpoint+key)
+		if err != nil {
+			return "", err
+		}
+		return kvv2Response.Data[vaultValueKey].(string), err
+	}
 }
 
 // GetUses returns GitHub Actions used in workflows
 func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
+
+	// if this is a vault test
+	if vaultTest {
+		vaultClient, err := GetVaultClient()
+		if vaultClient == nil {
+			err = errors.New(
+				"To test Vault, a valid value must be provieded in VAULT_ADDR.",
+			)
+		}
+		vaultToken, err := GetVaultToken(vaultClient)
+		vaultTokenLength := len(vaultToken)
+		if err == nil {
+			fmt.Println("A valid Vault token of " + strconv.Itoa(vaultTokenLength) + " characters was retrieved.")
+		}
+		return err
+	}
 
 	// get clients set-up with the source org hostname
 	opts := GetOpts(sourceHostname)
