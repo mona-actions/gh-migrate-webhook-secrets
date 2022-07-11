@@ -52,10 +52,10 @@ var (
 
 	// Create the root cobra command
 	rootCmd = &cobra.Command{
-		Use:          "gh clone-webhooks",
-		Short:        "gh cli extension to clone webhooks",
-		Long:         `gh cli extension to clone webhooks from one organization's repositories to another. Supports Hashicorp Vault for secrets retrieval.`,
-		Version:      "0.0.0-development",
+		Use:          "gh webhook-migrator",
+		Short:        "GitHub CLI extension to migrate webhooks and their secrets",
+		Long:         `GitHub CLI extension to migrate webhooks and their secrets. Supports idempotency, cloning from a source org to destination org, and querying HashiCorp Vault for secrets.`,
+		Version:      "0.0.9-development",
 		SilenceUsage: true,
 		RunE:         CloneWebhooks,
 	}
