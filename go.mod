@@ -1,4 +1,4 @@
-module github.com/mona-actions/gh-clone-webhooks
+module github.com/mona-actions/gh-migrate-webhooks
 
 go 1.17
 
