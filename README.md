@@ -66,3 +66,4 @@ Flags:
 - [ ] Adjust timing for API calls for scale (1 second delay is too long)
 - [ ] Add way to define access token (for apps)
 - [ ] Update flags to better match other tooling (gh-migrate-deploy-hooks)
+- [ ] Remove requirement for destination org (assume updating instead of cloning)
