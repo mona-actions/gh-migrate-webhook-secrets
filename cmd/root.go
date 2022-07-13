@@ -39,6 +39,7 @@ var (
 
 	// Create some colors and a spinner
 	hiBlack = color.New(color.FgHiBlack).SprintFunc()
+	reset   = color.New(color.Reset).SprintFunc()
 	red     = color.New(color.FgRed).SprintFunc()
 	green   = color.New(color.FgGreen).SprintFunc()
 	cyan    = color.New(color.FgCyan).SprintFunc()
@@ -166,7 +167,7 @@ func askForConfirmation(s string) bool {
 func GetOpts(hostname string) (options api.ClientOptions) {
 	// set options
 	opts := api.ClientOptions{
-		Host:        organization,
+		Host:        hostname,
 		EnableCache: !noCache,
 		CacheTTL:    time.Hour,
 	}
@@ -247,18 +248,18 @@ func GetVaultClient() (client *vault.Client, err error) {
 }
 
 // Looks up secrets in HashiCorp Vault
-func GetVaultSecret(key string) (secret string, err error) {
+func GetVaultSecret(key string) (secret string, connErr error, keyErr error) {
 
 	// Get the Vault client. If no vault client and no errors were returned, skip this step
-	vaultClient, err := GetVaultClient()
-	if vaultClient == nil && err == nil {
-		return "", err
+	vaultClient, connErr := GetVaultClient()
+	if vaultClient == nil && connErr == nil {
+		return "", connErr, keyErr
 	}
 
 	// get the token
-	vaultToken, err := GetVaultToken(vaultClient)
-	if err != nil {
-		return "", err
+	vaultToken, connErr := GetVaultToken(vaultClient)
+	if connErr != nil {
+		return "", connErr, keyErr
 	}
 
 	// authenticate
@@ -271,18 +272,18 @@ func GetVaultSecret(key string) (secret string, err error) {
 
 	if vaultKvv1 {
 		// query using kvv1
-		kvv1Response, err := vaultClient.KVv1("secret").Get(context.Background(), vaultMountpoint+key)
-		if err != nil {
-			return "", err
+		kvv1Response, keyErr := vaultClient.KVv1("secret").Get(context.Background(), vaultMountpoint+key)
+		if keyErr != nil {
+			return "", connErr, keyErr
 		}
-		return kvv1Response.Data[vaultValueKey].(string), err
+		return kvv1Response.Data[vaultValueKey].(string), connErr, keyErr
 	} else {
 		// query using kvv2
-		kvv2Response, err := vaultClient.KVv2("secret").Get(context.Background(), vaultMountpoint+key)
-		if err != nil {
-			return "", err
+		kvv2Response, keyErr := vaultClient.KVv2("secret").Get(context.Background(), vaultMountpoint+key)
+		if keyErr != nil {
+			return "", connErr, keyErr
 		}
-		return kvv2Response.Data[vaultValueKey].(string), err
+		return kvv2Response.Data[vaultValueKey].(string), connErr, keyErr
 	}
 }
 
@@ -306,13 +307,16 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	// get clients set-up with the source org hostname
-	opts := GetOpts(organization)
+	opts := GetOpts(hostname)
 	restClient, restErr := gh.RESTClient(&opts)
 	if restErr != nil {
+		fmt.Println(red("Failed set set up REST client."))
 		return restErr
 	}
+
 	graphqlClient, graphqlErr := gh.GQLClient(&opts)
 	if graphqlErr != nil {
+		fmt.Println(red("Failed set set up GraphQL client."))
 		return graphqlErr
 	}
 
@@ -380,11 +384,18 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	// set up table header for displaying of data
 	sp.Suffix = fmt.Sprintf(" creating table data for display.")
 	var td = pterm.TableData{
-		{"Repository", "ID", "URL", "Active", "Content Type", "Events"},
+		{
+			"Repository",
+			"ID",
+			"Hook URL",
+			"Secret Path",
+			"Secret Found?",
+		},
 	}
 
 	// Loop through repositories and get webhooks
 	webhooks := []Webhook{}
+	var missingSecrets = 0
 	for _, repo := range repositories {
 
 		// set a var to store the webhook array in
@@ -406,16 +417,55 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		for i, webhook := range webhooksResponse {
 			// add the repo name the webhook
 			webhook.Repository = repo.Name
+
+			// try to get the webhook secret value from Vault
+			sp.Suffix = fmt.Sprintf(
+				" getting secret for webhook %s in repository %s",
+				webhook.Config.URL,
+				webhook.Repository,
+			)
+			webhookSecret, connErr, keyErr := GetVaultSecret(webhook.Repository)
+			if connErr != nil {
+				sp.Stop()
+				fmt.Println()
+				return err
+			} else if keyErr != nil {
+				missingSecrets++
+				// logic to prompt here
+			}
+
+			// add the secret to the webhook
+			webhook.Config.Secret = webhookSecret
+
+			// set variables
+			webhookName := repo.Name
+			webhookId := strconv.Itoa(webhook.ID)
+			webhookUrl := webhook.Config.URL
+			// add trailing slash to mountpoint if it's not provided
+			if vaultMountpoint != "" && !strings.HasSuffix(vaultMountpoint, "/") {
+				vaultMountpoint += "/"
+			}
+			webhookSecretPath := vaultMountpoint + repo.Name
+			webhookSecretFound := "Yes"
+
+			//modify output when webhook isn't found
+			if webhookSecret == "" {
+				webhookName = red(webhookName)
+				webhookId = red(webhookId)
+				webhookUrl = red(webhookUrl)
+				webhookSecretPath = red(webhookSecretPath)
+				webhookSecretFound = red("No")
+			}
+
 			// overwrite the webhook at the index in the array
 			webhooksResponse[i] = webhook
 			// add to table data
 			td = append(td, []string{
-				repo.Name,
-				strconv.Itoa(webhook.ID),
-				webhook.Config.URL,
-				strconv.FormatBool(webhook.Active),
-				webhook.Config.Content_Type,
-				strings.Join(webhook.Events, ","),
+				webhookName,
+				webhookId,
+				webhookUrl,
+				webhookSecretPath,
+				webhookSecretFound,
 			})
 		}
 
@@ -437,7 +487,13 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// confirm the executor wants to proceed
 	if !confirm {
-		c := askForConfirmation("Are you sure you want to process all repositories on " + hostname + "/" + organization + "?")
+
+		missingMessage := ""
+		if missingSecrets > 0 {
+			missingMessage = red(strconv.Itoa(missingSecrets) + " webhook(s) are missing secrets. ")
+		}
+
+		c := askForConfirmation(missingMessage + "Are you sure you want to continue?")
 		if !c {
 			fmt.Println()
 			fmt.Println("Process exited.")
@@ -452,19 +508,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	// loop through all webhooks
 	var success = 0
 	for _, webhook := range webhooks {
-
-		// try to get the webhook secret value from Vault
-		sp.Suffix = fmt.Sprintf(
-			" getting secret for webhook %s in repository %s",
-			webhook.Config.URL,
-			webhook.Repository,
-		)
-		webhookSecret, err := GetVaultSecret(webhook.Repository)
-		if err != nil {
-			sp.Stop()
-			fmt.Println()
-			return err
-		}
 
 		// output what's current processing
 		sp.Suffix = fmt.Sprintf(
@@ -484,7 +527,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 				URL:          webhook.Config.URL,
 				Content_Type: webhook.Config.Content_Type,
 				Insecure_SSL: webhook.Config.Insecure_SSL,
-				Secret:       webhookSecret,
+				Secret:       webhook.Config.Secret,
 				Token:        webhook.Config.Token,
 				Digest:       webhook.Config.Digest,
 			},
