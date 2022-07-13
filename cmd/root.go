@@ -27,17 +27,15 @@ import (
 var (
 
 	// Set up main variables
-	noCache             = false
-	confirm             = false
-	ignoreErrors        = false
-	sourceHostname      string
-	sourceOrg           string
-	destinationHostname string
-	destinationOrg      string
-	vaultMountpoint     string
-	vaultValueKey       string
-	vaultKvv1           = false
-	vaultTest           = false
+	noCache         = false
+	confirm         = false
+	ignoreErrors    = false
+	hostname        string
+	organization    string
+	vaultMountpoint string
+	vaultValueKey   string
+	vaultKvv1       = false
+	vaultTest       = false
 
 	// Create some colors and a spinner
 	hiBlack = color.New(color.FgHiBlack).SprintFunc()
@@ -53,8 +51,8 @@ var (
 	// Create the root cobra command
 	rootCmd = &cobra.Command{
 		Use:          "gh migrate-webhook-secrets",
-		Short:        "GitHub CLI extension to migrate webhooks and their secrets",
-		Long:         `GitHub CLI extension to migrate webhooks and their secrets. Supports idempotency, cloning from a source org to destination org, and querying HashiCorp Vault for secrets.`,
+		Short:        "GitHub CLI extension to migrate webhook secrets",
+		Long:         `GitHub CLI extension to migrate webhook secrets. Supports HashiCorp Vault (KV V1 & V2) as the secret storage intermediary.`,
 		Version:      "0.0.9-development",
 		SilenceUsage: true,
 		RunE:         CloneWebhooks,
@@ -115,10 +113,8 @@ type VaultAppRoleLogin struct {
 func init() {
 
 	// base flags
-	rootCmd.PersistentFlags().StringVar(&sourceHostname, "source-hostname", "github.com", "Source GitHub hostname")
-	rootCmd.PersistentFlags().StringVar(&sourceOrg, "source-org", "", "Source organization name")
-	rootCmd.PersistentFlags().StringVar(&destinationHostname, "destination-hostname", "github.com", "Destination GitHub hostname")
-	rootCmd.PersistentFlags().StringVar(&destinationOrg, "destination-org", "", "Destination organization name")
+	rootCmd.PersistentFlags().StringVar(&hostname, "hostname", "github.com", "GitHub hostname")
+	rootCmd.PersistentFlags().StringVar(&organization, "org", "", "Organization name")
 
 	// vault flags
 	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "", "The mount point of the secrets, prefixes the --vault-value-key flag")
@@ -170,7 +166,7 @@ func askForConfirmation(s string) bool {
 func GetOpts(hostname string) (options api.ClientOptions) {
 	// set options
 	opts := api.ClientOptions{
-		Host:        sourceHostname,
+		Host:        organization,
 		EnableCache: !noCache,
 		CacheTTL:    time.Hour,
 	}
@@ -310,7 +306,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	// get clients set-up with the source org hostname
-	opts := GetOpts(sourceHostname)
+	opts := GetOpts(organization)
 	restClient, restErr := gh.RESTClient(&opts)
 	if restErr != nil {
 		return restErr
@@ -324,30 +320,24 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	r, _ := regexp.Compile("^http(s|)://")
 
 	// validate flags provided
-	if r.MatchString(sourceHostname) {
-		return fmt.Errorf("Source hostname contains http(s) prefix and should not.")
+	if r.MatchString(hostname) {
+		return fmt.Errorf("Hostname contains http(s) prefix and should not.")
 	}
-	if r.MatchString(destinationHostname) {
-		return fmt.Errorf("Destination hostname contains http(s) prefix and should not.")
-	}
-	if sourceOrg == "" {
-		return fmt.Errorf("A source organization must be provided.")
-	}
-	if destinationOrg == "" {
-		return fmt.Errorf("A destination organization must be provided.")
+	if organization == "" {
+		return fmt.Errorf("An organization must be provided.")
 	}
 
 	// print out some information about the process
 	fmt.Println()
-	fmt.Println(cyan("Source: ") + sourceHostname + "/" + sourceOrg)
-	fmt.Println(cyan("Destination: ") + destinationHostname + "/" + destinationOrg)
+	fmt.Println(cyan("Host: ") + hostname)
+	fmt.Println(cyan("Organization: ") + organization)
 	fmt.Println()
 
 	fmt.Println()
 
 	// get our variables set up for the graphql query
 	variables := map[string]interface{}{
-		"owner": graphql.String(sourceOrg),
+		"owner": graphql.String(organization),
 		"page":  (*graphql.String)(nil),
 	}
 
@@ -362,7 +352,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// show a suffix next to the spinner for what we are curretnly doing
 		sp.Suffix = fmt.Sprintf(
 			" fetching repositories from %s %s",
-			sourceOrg,
+			organization,
 			hiBlack(fmt.Sprintf("(page %d)", i)),
 		)
 
@@ -447,24 +437,13 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// confirm the executor wants to proceed
 	if !confirm {
-		c := askForConfirmation("Do you want to clone all webhooks to org " + destinationHostname + "/" + destinationOrg + "?")
+		c := askForConfirmation("Are you sure you want to process all repositories on " + hostname + "/" + organization + "?")
 		if !c {
 			fmt.Println()
 			fmt.Println("Process exited.")
 			return err
 		}
 		fmt.Println()
-	}
-
-	// get clients set-up with the destination org hostname
-	opts = GetOpts(destinationHostname)
-	restClient, restErr = gh.RESTClient(&opts)
-	if restErr != nil {
-		return restErr
-	}
-	graphqlClient, graphqlErr = gh.GQLClient(&opts)
-	if graphqlErr != nil {
-		return graphqlErr
 	}
 
 	sp.Restart()
@@ -523,7 +502,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 		// post the request
 		webhookResponse := Webhook{}
-		err = restClient.Post("repos/"+destinationOrg+"/"+webhook.Repository+"/hooks", reader, &webhookResponse)
+		err = restClient.Post("repos/"+organization+"/"+webhook.Repository+"/hooks", reader, &webhookResponse)
 
 		// validate the request worked.
 		if err != nil {
