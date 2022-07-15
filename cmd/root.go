@@ -32,6 +32,7 @@ var (
 	ignoreErrors    = false
 	hostname        string
 	organization    string
+	token           string
 	vaultMountpoint string
 	vaultValueKey   string
 	vaultPathKey    string
@@ -124,6 +125,7 @@ func init() {
 	// base flags
 	rootCmd.PersistentFlags().StringVar(&hostname, "hostname", "github.com", "GitHub hostname")
 	rootCmd.PersistentFlags().StringVar(&organization, "org", "", "Organization name")
+	rootCmd.PersistentFlags().StringVar(&token, "token", "", "Optional token for authentication (uses GitHub CLI built-in authentication)")
 
 	// vault flags
 	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "secret", "The mount point of the secrets on the Vault server")
@@ -178,6 +180,9 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 		Host:        hostname,
 		EnableCache: !noCache,
 		CacheTTL:    time.Hour,
+	}
+	if token != "" {
+		opts.AuthToken = token
 	}
 	return opts
 }

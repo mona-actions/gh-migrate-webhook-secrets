@@ -43,6 +43,7 @@ Flags:
       --ignore-errors             Proceed regardless of errors
       --no-cache                  Disable cache for GitHub API requests
       --org string                Organization name
+      --token string              Optional token for authentication (uses GitHub CLI built-in authentication)
       --vault-kvv1                Use Vault KVv1 instead of KVv2
       --vault-mountpoint string   The mount point of the secrets on the Vault server (default "secret")
       --vault-path-key string     The key in the webhook URL (ex: <webhook-server>?secret=<vault-path-key>) to use for finding the corresponding secret
