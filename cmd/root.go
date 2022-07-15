@@ -32,11 +32,11 @@ var (
 	ignoreErrors    = false
 	hostname        string
 	organization    string
+	token           string
 	vaultMountpoint string
 	vaultValueKey   string
 	vaultPathKey    string
 	vaultKvv1       = false
-	vaultTest       = false
 
 	// Create some colors and a spinner
 	hiBlack = color.New(color.FgHiBlack).SprintFunc()
@@ -55,7 +55,7 @@ var (
 		Use:           "gh migrate-webhook-secrets",
 		Short:         "GitHub CLI extension to migrate webhook secrets",
 		Long:          `GitHub CLI extension to migrate webhook secrets. Supports HashiCorp Vault (KV V1 & V2) as the secret storage intermediary.`,
-		Version:       "0.0.9-development",
+		Version:       "0.1.1",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          CloneWebhooks,
@@ -125,13 +125,13 @@ func init() {
 	// base flags
 	rootCmd.PersistentFlags().StringVar(&hostname, "hostname", "github.com", "GitHub hostname")
 	rootCmd.PersistentFlags().StringVar(&organization, "org", "", "Organization name")
+	rootCmd.PersistentFlags().StringVar(&token, "token", "", "Optional token for authentication (uses GitHub CLI built-in authentication)")
 
 	// vault flags
 	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "secret", "The mount point of the secrets on the Vault server")
 	rootCmd.PersistentFlags().StringVar(&vaultPathKey, "vault-path-key", "", "The key in the webhook URL (ex: <webhook-server>?secret=<vault-path-key>) to use for finding the corresponding secret")
 	rootCmd.PersistentFlags().StringVar(&vaultValueKey, "vault-value-key", "value", "The key in the Vault secret corresponding to the webhook secret value")
 	rootCmd.PersistentFlags().BoolVar(&vaultKvv1, "vault-kvv1", false, "Use Vault KVv1 instead of KVv2")
-	rootCmd.PersistentFlags().BoolVar(&vaultTest, "vault-test", false, "Test Vault connection (does not process webhooks)")
 
 	// boolean switches
 	rootCmd.PersistentFlags().BoolVar(&noCache, "no-cache", false, "Disable cache for GitHub API requests")
@@ -180,6 +180,9 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 		Host:        hostname,
 		EnableCache: !noCache,
 		CacheTTL:    time.Hour,
+	}
+	if token != "" {
+		opts.AuthToken = token
 	}
 	return opts
 }
@@ -414,9 +417,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		}
 		i++
 
-		// sleep for 1 second to avoid rate limiting
-		time.Sleep(1 * time.Second)
-
 		// set the end cursor for the page we are on
 		variables["page"] = &orgRepositoriesQuery.Organization.Repositories.PageInfo.EndCursor
 	}
@@ -534,9 +534,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 		// append to the list of webooks
 		webhooks = append(webhooks, webhooksResponse...)
-
-		// sleep for 1 second to avoid rate limiting
-		time.Sleep(1 * time.Second)
 	}
 
 	// stop the spinner animation
@@ -627,9 +624,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			// update success count.
 			success++
 		}
-
-		// sleep for 1 second to avoid rate limiting
-		time.Sleep(1 * time.Second)
 	}
 	sp.Stop()
 
