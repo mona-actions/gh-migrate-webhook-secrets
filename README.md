@@ -17,10 +17,6 @@
     - To authenticate with Role ID and Secret ID (will take preference if both are provided):
       - `VAULT_ROLE_ID`
       - `VAULT_SECRET_ID`
-  - Flags:
-    - `--vault-mountpoint`: The mount point of the secrets database on Vault.
-    - `--vault-value-key`: The corresponding key for the value of the secret stored.
-    - `--vault-kvv1`: If you need to use Vault KVv1, add this switch.
 
 ## Install
 
@@ -50,7 +46,6 @@ Flags:
       --vault-kvv1                Use Vault KVv1 instead of KVv2
       --vault-mountpoint string   The mount point of the secrets on the Vault server (default "secret")
       --vault-path-key string     The key in the webhook URL (ex: <webhook-server>?secret=<vault-path-key>) to use for finding the corresponding secret
-      --vault-test                Test Vault connection (does not process webhooks)
       --vault-value-key string    The key in the Vault secret corresponding to the webhook secret value (default "value")
   -v, --version                   version for gh
 ```
@@ -62,7 +57,7 @@ Flags:
 ## Fixes To Add
 - [x] Add "update or create" logic to webhook creation
 - [x] Adjust vault secret retrieval for v1 with role id & mount point (`${MOUNT}/${produit}/${vault_token}`)
-- [ ] Adjust timing for API calls for scale (1 second delay is too long)
+- [x] Adjust timing for API calls for scale (1 second delay is too long)
 - [ ] Add way to define access token (for apps)
 - [ ] Update flags to better match other tooling (gh-migrate-deploy-hooks)
 - [x] Remove requirement for destination org (assume updating instead of cloning)
