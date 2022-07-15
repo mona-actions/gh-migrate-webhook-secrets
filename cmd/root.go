@@ -90,21 +90,28 @@ type Repository struct {
 }
 
 type WebHookConfig struct {
-	URL          string `json:"url"`
-	Content_Type string `json:"content_type"`
-	Insecure_SSL string `json:"insecure_ssl"`
+	URL          string
+	Content_Type string
+	Insecure_SSL string
 	Secret       string `json:"secret"`
-	Token        string `json:"token"`
-	Digest       string `json:"digest"`
+	Token        string
+	Digest       string
 }
 
 type Webhook struct {
 	ID         int
 	Repository string
-	Name       string        `json:"name"`
+	Name       string
 	Config     WebHookConfig `json:"config"`
-	Events     []string      `json:"events"`
-	Active     bool          `json:"active"`
+	Events     []string
+	Active     bool
+}
+
+type WebHookPatch struct {
+	URL          string `json:"url"`
+	Content_Type string `json:"content_type"`
+	Insecure_SSL string `json:"insecure_ssl"`
+	Secret       string `json:"secret"`
 }
 
 type VaultAppRoleLogin struct {
@@ -453,7 +460,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 			// set variables for looking up secrets
 			webhookLookupSecret := true
-			webhookSecret := ""
 			webhookSecretPath := repo.Name
 
 			// set display variables
@@ -502,11 +508,11 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 					missingSecrets++
 					webhookSecretFound = red(keyErr)
 				}
-				webhookSecret = foundSecret
+				webhook.Config.Secret = foundSecret
 			}
 
 			// modify output when a secret is not found
-			if webhookSecret == "" {
+			if webhook.Config.Secret == "" {
 				webhookName = red(webhookName)
 				webhookId = red(webhookId)
 				webhookUrl = red(webhookUrl)
@@ -573,27 +579,16 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			webhook.Repository,
 		)
 
-		// Add read to check for existing webhook
-
-		// choose wether to update webhook or create new
-
 		// set up the encoding reader from the current webhook
-		var webhookToCreate = Webhook{
-			Name: webhook.Name,
-			Config: WebHookConfig{
-				URL:          webhook.Config.URL,
-				Content_Type: webhook.Config.Content_Type,
-				Insecure_SSL: webhook.Config.Insecure_SSL,
-				Secret:       webhook.Config.Secret,
-				Token:        webhook.Config.Token,
-				Digest:       webhook.Config.Digest,
-			},
-			Events: webhook.Events,
-			Active: webhook.Active,
+		var webhookToUpdate = WebHookPatch{
+			URL:          webhook.Config.URL,
+			Content_Type: webhook.Config.Content_Type,
+			Insecure_SSL: webhook.Config.Insecure_SSL,
+			Secret:       webhook.Config.Secret,
 		}
 
 		// convert the struct to io.reader
-		data, err := json.Marshal(&webhookToCreate)
+		data, err := json.Marshal(&webhookToUpdate)
 		if err != nil {
 			sp.Stop()
 			return err
@@ -602,7 +597,11 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 		// post the request
 		webhookResponse := Webhook{}
-		err = restClient.Post("repos/"+organization+"/"+webhook.Repository+"/hooks", reader, &webhookResponse)
+		err = restClient.Patch(
+			"repos/"+organization+"/"+webhook.Repository+"/hooks/"+strconv.Itoa(webhook.ID)+"/config",
+			reader,
+			&webhookResponse,
+		)
 
 		// validate the request worked.
 		if err != nil {
@@ -635,7 +634,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	sp.Stop()
 
 	// send back result to user
-	fmt.Println("Successfully cloned " + strconv.Itoa(success) + " webhooks.")
+	fmt.Println("Successfully migrated secrets for " + strconv.Itoa(success) + " webhook(s).")
 
 	return err
 }
