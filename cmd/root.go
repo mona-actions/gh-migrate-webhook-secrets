@@ -412,9 +412,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		}
 		i++
 
-		// sleep for 1 second to avoid rate limiting
-		time.Sleep(1 * time.Second)
-
 		// set the end cursor for the page we are on
 		variables["page"] = &orgRepositoriesQuery.Organization.Repositories.PageInfo.EndCursor
 	}
@@ -532,9 +529,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 		// append to the list of webooks
 		webhooks = append(webhooks, webhooksResponse...)
-
-		// sleep for 1 second to avoid rate limiting
-		time.Sleep(1 * time.Second)
 	}
 
 	// stop the spinner animation
@@ -625,9 +619,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			// update success count.
 			success++
 		}
-
-		// sleep for 1 second to avoid rate limiting
-		time.Sleep(1 * time.Second)
 	}
 	sp.Stop()
 
