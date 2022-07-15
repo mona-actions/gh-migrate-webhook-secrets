@@ -27,20 +27,20 @@ import (
 var (
 
 	// Set up main variables
-	noCache             = false
-	confirm             = false
-	ignoreErrors        = false
-	sourceHostname      string
-	sourceOrg           string
-	destinationHostname string
-	destinationOrg      string
-	vaultMountpoint     string
-	vaultValueKey       string
-	vaultKvv1           = false
-	vaultTest           = false
+	noCache         = false
+	confirm         = false
+	ignoreErrors    = false
+	hostname        string
+	organization    string
+	vaultMountpoint string
+	vaultValueKey   string
+	vaultPathKey    string
+	vaultKvv1       = false
+	vaultTest       = false
 
 	// Create some colors and a spinner
 	hiBlack = color.New(color.FgHiBlack).SprintFunc()
+	reset   = color.New(color.Reset).SprintFunc()
 	red     = color.New(color.FgRed).SprintFunc()
 	green   = color.New(color.FgGreen).SprintFunc()
 	cyan    = color.New(color.FgCyan).SprintFunc()
@@ -52,12 +52,13 @@ var (
 
 	// Create the root cobra command
 	rootCmd = &cobra.Command{
-		Use:          "gh migrate-webhooks",
-		Short:        "GitHub CLI extension to migrate webhooks and their secrets",
-		Long:         `GitHub CLI extension to migrate webhooks and their secrets. Supports idempotency, cloning from a source org to destination org, and querying HashiCorp Vault for secrets.`,
-		Version:      "0.0.9-development",
-		SilenceUsage: true,
-		RunE:         CloneWebhooks,
+		Use:           "gh migrate-webhook-secrets",
+		Short:         "GitHub CLI extension to migrate webhook secrets",
+		Long:          `GitHub CLI extension to migrate webhook secrets. Supports HashiCorp Vault (KV V1 & V2) as the secret storage intermediary.`,
+		Version:       "0.0.9-development",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE:          CloneWebhooks,
 	}
 
 	// set up graphql query for repos
@@ -89,21 +90,28 @@ type Repository struct {
 }
 
 type WebHookConfig struct {
-	URL          string `json:"url"`
-	Content_Type string `json:"content_type"`
-	Insecure_SSL string `json:"insecure_ssl"`
+	URL          string
+	Content_Type string
+	Insecure_SSL string
 	Secret       string `json:"secret"`
-	Token        string `json:"token"`
-	Digest       string `json:"digest"`
+	Token        string
+	Digest       string
 }
 
 type Webhook struct {
 	ID         int
 	Repository string
-	Name       string        `json:"name"`
+	Name       string
 	Config     WebHookConfig `json:"config"`
-	Events     []string      `json:"events"`
-	Active     bool          `json:"active"`
+	Events     []string
+	Active     bool
+}
+
+type WebHookPatch struct {
+	URL          string `json:"url"`
+	Content_Type string `json:"content_type"`
+	Insecure_SSL string `json:"insecure_ssl"`
+	Secret       string `json:"secret"`
 }
 
 type VaultAppRoleLogin struct {
@@ -115,16 +123,15 @@ type VaultAppRoleLogin struct {
 func init() {
 
 	// base flags
-	rootCmd.PersistentFlags().StringVar(&sourceHostname, "source-hostname", "github.com", "Source GitHub hostname")
-	rootCmd.PersistentFlags().StringVar(&sourceOrg, "source-org", "", "Source organization name")
-	rootCmd.PersistentFlags().StringVar(&destinationHostname, "destination-hostname", "github.com", "Destination GitHub hostname")
-	rootCmd.PersistentFlags().StringVar(&destinationOrg, "destination-org", "", "Destination organization name")
+	rootCmd.PersistentFlags().StringVar(&hostname, "hostname", "github.com", "GitHub hostname")
+	rootCmd.PersistentFlags().StringVar(&organization, "org", "", "Organization name")
 
 	// vault flags
-	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "", "The mount point of the secrets, prefixes the --vault-value-key flag")
-	rootCmd.PersistentFlags().StringVar(&vaultValueKey, "vault-value-key", "secret", "The key in the Vault secret corresponding to the webhook secret value")
+	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "secret", "The mount point of the secrets on the Vault server")
+	rootCmd.PersistentFlags().StringVar(&vaultPathKey, "vault-path-key", "", "The key in the webhook URL (ex: <webhook-server>?secret=<vault-path-key>) to use for finding the corresponding secret")
+	rootCmd.PersistentFlags().StringVar(&vaultValueKey, "vault-value-key", "value", "The key in the Vault secret corresponding to the webhook secret value")
 	rootCmd.PersistentFlags().BoolVar(&vaultKvv1, "vault-kvv1", false, "Use Vault KVv1 instead of KVv2")
-	rootCmd.PersistentFlags().BoolVar(&vaultTest, "vault-test", false, "Test Vault connection")
+	rootCmd.PersistentFlags().BoolVar(&vaultTest, "vault-test", false, "Test Vault connection (does not process webhooks)")
 
 	// boolean switches
 	rootCmd.PersistentFlags().BoolVar(&noCache, "no-cache", false, "Disable cache for GitHub API requests")
@@ -170,7 +177,7 @@ func askForConfirmation(s string) bool {
 func GetOpts(hostname string) (options api.ClientOptions) {
 	// set options
 	opts := api.ClientOptions{
-		Host:        sourceHostname,
+		Host:        hostname,
 		EnableCache: !noCache,
 		CacheTTL:    time.Hour,
 	}
@@ -251,72 +258,74 @@ func GetVaultClient() (client *vault.Client, err error) {
 }
 
 // Looks up secrets in HashiCorp Vault
-func GetVaultSecret(key string) (secret string, err error) {
+func GetVaultSecret(key string) (secret string, connErr error, pathErr error) {
 
 	// Get the Vault client. If no vault client and no errors were returned, skip this step
-	vaultClient, err := GetVaultClient()
-	if vaultClient == nil && err == nil {
-		return "", err
+	vaultClient, connErr := GetVaultClient()
+	if vaultClient == nil && connErr == nil {
+		return "", connErr, pathErr
 	}
 
 	// get the token
-	vaultToken, err := GetVaultToken(vaultClient)
-	if err != nil {
-		return "", err
+	vaultToken, connErr := GetVaultToken(vaultClient)
+	if connErr != nil {
+		return "", connErr, pathErr
 	}
 
 	// authenticate
 	vaultClient.SetToken(vaultToken)
 
-	// add trailing slash to mountpoint if it's not provided
-	if vaultMountpoint != "" && !strings.HasSuffix(vaultMountpoint, "/") {
-		vaultMountpoint += "/"
-	}
+	var secretValue = ""
+	var secretInterface interface{}
+	var foundKey bool = false
 
 	if vaultKvv1 {
 		// query using kvv1
-		kvv1Response, err := vaultClient.KVv1("secret").Get(context.Background(), vaultMountpoint+key)
-		if err != nil {
-			return "", err
+		kvv1Response, pathErr := vaultClient.KVv1(vaultMountpoint).Get(context.Background(), "data/"+key)
+		if pathErr != nil {
+			return "", connErr, pathErr
 		}
-		return kvv1Response.Data[vaultValueKey].(string), err
+		secretResponse := kvv1Response.Data["data"]
+		for k, v := range secretResponse.(map[string]interface{}) {
+			if k == vaultValueKey {
+				secretInterface = v
+				foundKey = true
+				break
+			}
+		}
+
 	} else {
 		// query using kvv2
-		kvv2Response, err := vaultClient.KVv2("secret").Get(context.Background(), vaultMountpoint+key)
-		if err != nil {
-			return "", err
+		kvv2Response, pathErr := vaultClient.KVv2(vaultMountpoint).Get(context.Background(), key)
+		if pathErr != nil {
+			return "", connErr, pathErr
 		}
-		return kvv2Response.Data[vaultValueKey].(string), err
+		secretInterface, foundKey = kvv2Response.Data[vaultValueKey]
 	}
+
+	// validate the interface contains the matching key.
+	if foundKey {
+		secretValue = secretInterface.(string)
+	} else {
+		pathErr = errors.New("Key '" + vaultValueKey + "' not found in secret.")
+	}
+	return secretValue, connErr, pathErr
 }
 
 // GetUses returns GitHub Actions used in workflows
 func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
-	// if this is a vault test
-	if vaultTest {
-		vaultClient, err := GetVaultClient()
-		if vaultClient == nil {
-			err = errors.New(
-				"To test Vault, a valid value must be provieded in VAULT_ADDR.",
-			)
-		}
-		vaultToken, err := GetVaultToken(vaultClient)
-		vaultTokenLength := len(vaultToken)
-		if err == nil {
-			fmt.Println("A valid Vault token of " + strconv.Itoa(vaultTokenLength) + " characters was retrieved.")
-		}
-		return err
-	}
-
 	// get clients set-up with the source org hostname
-	opts := GetOpts(sourceHostname)
+	opts := GetOpts(hostname)
 	restClient, restErr := gh.RESTClient(&opts)
 	if restErr != nil {
+		fmt.Println(red("Failed set set up REST client."))
 		return restErr
 	}
+
 	graphqlClient, graphqlErr := gh.GQLClient(&opts)
 	if graphqlErr != nil {
+		fmt.Println(red("Failed set set up GraphQL client."))
 		return graphqlErr
 	}
 
@@ -324,30 +333,57 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	r, _ := regexp.Compile("^http(s|)://")
 
 	// validate flags provided
-	if r.MatchString(sourceHostname) {
-		return fmt.Errorf("Source hostname contains http(s) prefix and should not.")
+	if r.MatchString(hostname) {
+		return fmt.Errorf("Hostname contains http(s) prefix and should not.")
 	}
-	if r.MatchString(destinationHostname) {
-		return fmt.Errorf("Destination hostname contains http(s) prefix and should not.")
+	if organization == "" {
+		return fmt.Errorf("An organization must be provided.")
 	}
-	if sourceOrg == "" {
-		return fmt.Errorf("A source organization must be provided.")
+	if os.Getenv("VAULT_ADDR") == "" {
+		return fmt.Errorf("A valid Vault address must be provided.")
 	}
-	if destinationOrg == "" {
-		return fmt.Errorf("A destination organization must be provided.")
+	if os.Getenv("VAULT_TOKEN") == "" && (os.Getenv("VAULT_ROLE_ID") == "" || os.Getenv("VAULT_SECRET_ID") == "") {
+		return fmt.Errorf("You must provide a Vault token or Vault role ID and secret ID for authentication.")
 	}
 
-	// print out some information about the process
+	// print out information about the process
 	fmt.Println()
-	fmt.Println(cyan("Source: ") + sourceHostname + "/" + sourceOrg)
-	fmt.Println(cyan("Destination: ") + destinationHostname + "/" + destinationOrg)
-	fmt.Println()
+	fmt.Println(cyan("Host: ") + hostname)
+	fmt.Println(cyan("Organization: ") + organization)
 
+	vaultVersion := "2"
+	if vaultKvv1 {
+		vaultVersion = "1"
+	}
+	fmt.Println(cyan("Vault KV Version: ") + "v" + vaultVersion)
+
+	if vaultMountpoint != "" {
+		fmt.Println(cyan("Vault Mount Point: ") + vaultMountpoint)
+	}
+	if vaultPathKey != "" {
+		fmt.Println(cyan("Vault Path Key: ") + vaultPathKey)
+	}
+
+	// test vault connection
+	vaultClient, err := GetVaultClient()
+	if vaultClient == nil {
+		err = errors.New(
+			"Vault connection failed.",
+		)
+	}
+	_, err = GetVaultToken(vaultClient)
+	if err != nil {
+		fmt.Println()
+		fmt.Println("Connection to Vault failed.")
+		return err
+	}
+
+	fmt.Println()
 	fmt.Println()
 
 	// get our variables set up for the graphql query
 	variables := map[string]interface{}{
-		"owner": graphql.String(sourceOrg),
+		"owner": graphql.String(organization),
 		"page":  (*graphql.String)(nil),
 	}
 
@@ -362,7 +398,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// show a suffix next to the spinner for what we are curretnly doing
 		sp.Suffix = fmt.Sprintf(
 			" fetching repositories from %s %s",
-			sourceOrg,
+			organization,
 			hiBlack(fmt.Sprintf("(page %d)", i)),
 		)
 
@@ -376,8 +412,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		if !orgRepositoriesQuery.Organization.Repositories.PageInfo.HasNextPage {
 			break
 		}
-
-		// increment for spinner suffix visibility
 		i++
 
 		// sleep for 1 second to avoid rate limiting
@@ -390,11 +424,18 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	// set up table header for displaying of data
 	sp.Suffix = fmt.Sprintf(" creating table data for display.")
 	var td = pterm.TableData{
-		{"Repository", "ID", "URL", "Active", "Content Type", "Events"},
+		{
+			"Repository",
+			"ID",
+			"Hook URL",
+			"Secret Path",
+			"Secret Found?",
+		},
 	}
 
 	// Loop through repositories and get webhooks
 	webhooks := []Webhook{}
+	var missingSecrets = 0
 	for _, repo := range repositories {
 
 		// set a var to store the webhook array in
@@ -416,16 +457,78 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		for i, webhook := range webhooksResponse {
 			// add the repo name the webhook
 			webhook.Repository = repo.Name
+
+			// set variables for looking up secrets
+			webhookLookupSecret := true
+			webhookSecretPath := repo.Name
+
+			// set display variables
+			webhookName := repo.Name
+			webhookId := strconv.Itoa(webhook.ID)
+			webhookUrl := webhook.Config.URL
+			webhookSecretFound := "Yes"
+
+			// try to parse the webhook path from the URL the vault-path-key flag is provided
+			if vaultPathKey != "" {
+
+				// make sure URL contains the path key and split the URL by ?
+				webhookUrlPieces := strings.Split(webhook.Config.URL, "?")
+				if strings.Contains(webhook.Config.URL, vaultPathKey) && len(webhookUrlPieces) == 2 {
+
+					// split the URL parameters by &
+					webhookParameters := strings.Split(webhookUrlPieces[1], "&")
+					// loop pieces and find the value from the path key
+					for _, piece := range webhookParameters {
+						if strings.HasPrefix(piece, vaultPathKey) {
+							webhookSecretPath = strings.Replace(piece, vaultPathKey+"=", "", 1)
+							break
+						}
+					}
+
+				} else {
+					missingSecrets++
+					webhookSecretFound = red("No parameters found in Webhook URL")
+					webhookLookupSecret = false
+				}
+			}
+
+			// only lookup when the previous step hasn't failed
+			if webhookLookupSecret {
+				// try to get the webhook secret value from Vault
+				sp.Suffix = fmt.Sprintf(
+					" getting secret for webhook %s in repository %s",
+					webhook.Config.URL,
+					webhook.Repository,
+				)
+				foundSecret, connErr, keyErr := GetVaultSecret(webhookSecretPath)
+				if connErr != nil {
+					sp.Stop()
+					return connErr
+				} else if keyErr != nil {
+					missingSecrets++
+					webhookSecretFound = red(keyErr)
+				}
+				webhook.Config.Secret = foundSecret
+			}
+
+			// modify output when a secret is not found
+			if webhook.Config.Secret == "" {
+				webhookName = red(webhookName)
+				webhookId = red(webhookId)
+				webhookUrl = red(webhookUrl)
+				webhookSecretPath = red(webhookSecretPath)
+			}
+
 			// overwrite the webhook at the index in the array
 			webhooksResponse[i] = webhook
+
 			// add to table data
 			td = append(td, []string{
-				repo.Name,
-				strconv.Itoa(webhook.ID),
-				webhook.Config.URL,
-				strconv.FormatBool(webhook.Active),
-				webhook.Config.Content_Type,
-				strings.Join(webhook.Events, ","),
+				webhookName,
+				webhookId,
+				webhookUrl,
+				webhookSecretPath,
+				webhookSecretFound,
 			})
 		}
 
@@ -447,24 +550,19 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// confirm the executor wants to proceed
 	if !confirm {
-		c := askForConfirmation("Do you want to clone all webhooks to org " + destinationHostname + "/" + destinationOrg + "?")
+
+		messagePrefix := "Ready to apply secrets."
+		if missingSecrets > 0 {
+			messagePrefix = red(strconv.Itoa(missingSecrets) + " webhook(s) are missing secrets.")
+		}
+
+		c := askForConfirmation(messagePrefix + " Are you sure you want to continue?")
 		if !c {
 			fmt.Println()
 			fmt.Println("Process exited.")
 			return err
 		}
 		fmt.Println()
-	}
-
-	// get clients set-up with the destination org hostname
-	opts = GetOpts(destinationHostname)
-	restClient, restErr = gh.RESTClient(&opts)
-	if restErr != nil {
-		return restErr
-	}
-	graphqlClient, graphqlErr = gh.GQLClient(&opts)
-	if graphqlErr != nil {
-		return graphqlErr
 	}
 
 	sp.Restart()
@@ -474,19 +572,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	var success = 0
 	for _, webhook := range webhooks {
 
-		// try to get the webhook secret value from Vault
-		sp.Suffix = fmt.Sprintf(
-			" getting secret for webhook %s in repository %s",
-			webhook.Config.URL,
-			webhook.Repository,
-		)
-		webhookSecret, err := GetVaultSecret(webhook.Repository)
-		if err != nil {
-			sp.Stop()
-			fmt.Println()
-			return err
-		}
-
 		// output what's current processing
 		sp.Suffix = fmt.Sprintf(
 			" creating webhook to %s in repository %s",
@@ -494,27 +579,16 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			webhook.Repository,
 		)
 
-		// Add read to check for existing webhook
-
-		// choose wether to update webhook or create new
-
 		// set up the encoding reader from the current webhook
-		var webhookToCreate = Webhook{
-			Name: webhook.Name,
-			Config: WebHookConfig{
-				URL:          webhook.Config.URL,
-				Content_Type: webhook.Config.Content_Type,
-				Insecure_SSL: webhook.Config.Insecure_SSL,
-				Secret:       webhookSecret,
-				Token:        webhook.Config.Token,
-				Digest:       webhook.Config.Digest,
-			},
-			Events: webhook.Events,
-			Active: webhook.Active,
+		var webhookToUpdate = WebHookPatch{
+			URL:          webhook.Config.URL,
+			Content_Type: webhook.Config.Content_Type,
+			Insecure_SSL: webhook.Config.Insecure_SSL,
+			Secret:       webhook.Config.Secret,
 		}
 
 		// convert the struct to io.reader
-		data, err := json.Marshal(&webhookToCreate)
+		data, err := json.Marshal(&webhookToUpdate)
 		if err != nil {
 			sp.Stop()
 			return err
@@ -523,7 +597,11 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 		// post the request
 		webhookResponse := Webhook{}
-		err = restClient.Post("repos/"+destinationOrg+"/"+webhook.Repository+"/hooks", reader, &webhookResponse)
+		err = restClient.Patch(
+			"repos/"+organization+"/"+webhook.Repository+"/hooks/"+strconv.Itoa(webhook.ID)+"/config",
+			reader,
+			&webhookResponse,
+		)
 
 		// validate the request worked.
 		if err != nil {
@@ -556,7 +634,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	sp.Stop()
 
 	// send back result to user
-	fmt.Println("Successfully cloned " + strconv.Itoa(success) + " webhooks.")
+	fmt.Println("Successfully migrated secrets for " + strconv.Itoa(success) + " webhook(s).")
 
 	return err
 }

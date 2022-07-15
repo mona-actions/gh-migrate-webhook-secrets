@@ -1,4 +1,4 @@
-module github.com/mona-actions/gh-migrate-webhooks
+module github.com/mona-actions/gh-migrate-webhook-secrets
 
 go 1.17
 
