@@ -35,25 +35,24 @@ $ gh migrate-webhook-secrets [flags]
 ```
 
 ```txt
-GitHub CLI extension to migrate webhooks and their secrets. Supports idempotency, cloning from a source org to destination org, and querying HashiCorp Vault for secrets.
+GitHub CLI extension to migrate webhook secrets. Supports HashiCorp Vault (KV V1 & V2) as the secret storage intermediary.
 
 Usage:
   gh migrate-webhook-secrets [flags]
 
 Flags:
-      --confirm                       Auto respond to confirmation prompt
-      --destination-hostname string   Destination GitHub hostname (default "github.com")
-      --destination-org string        Destination organization name
-  -h, --help                          help for gh
-      --ignore-errors                 Proceed regardless of errors
-      --no-cache                      Disable cache for GitHub API requests
-      --source-hostname string        Source GitHub hostname (default "github.com")
-      --source-org string             Source organization name
-      --vault-kvv1                    Use Vault KVv1 instead of KVv2
-      --vault-mountpoint string       The mount point of the secrets, prefixes the --vault-value-key flag
-      --vault-test                    Test Vault connection
-      --vault-value-key string        The key in the Vault secret corresponding to the webhook secret value (default "secret")
-  -v, --version                       version for gh
+      --confirm                   Auto respond to confirmation prompt
+  -h, --help                      help for gh
+      --hostname string           GitHub hostname (default "github.com")
+      --ignore-errors             Proceed regardless of errors
+      --no-cache                  Disable cache for GitHub API requests
+      --org string                Organization name
+      --vault-kvv1                Use Vault KVv1 instead of KVv2
+      --vault-mountpoint string   The mount point of the secrets on the Vault server (default "secret")
+      --vault-path-key string     The key in the webhook URL (ex: <webhook-server>?secret=<vault-path-key>) to use for finding the corresponding secret
+      --vault-test                Test Vault connection (does not process webhooks)
+      --vault-value-key string    The key in the Vault secret corresponding to the webhook secret value (default "value")
+  -v, --version                   version for gh
 ```
 
 ## Notes
@@ -61,9 +60,9 @@ Flags:
 - Does **NOT** support copying secrets directly from GitHub (must use third-party secret storage like HashiCorp Vault)
 
 ## Fixes To Add
-- [ ] Add "update or create" logic to webhook creation
+- [x] Add "update or create" logic to webhook creation
 - [x] Adjust vault secret retrieval for v1 with role id & mount point (`${MOUNT}/${produit}/${vault_token}`)
 - [ ] Adjust timing for API calls for scale (1 second delay is too long)
 - [ ] Add way to define access token (for apps)
 - [ ] Update flags to better match other tooling (gh-migrate-deploy-hooks)
-- [ ] Remove requirement for destination org (assume updating instead of cloning)
+- [x] Remove requirement for destination org (assume updating instead of cloning)
