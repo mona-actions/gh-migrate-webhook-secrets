@@ -59,6 +59,6 @@ Flags:
 - [x] Add "update or create" logic to webhook creation
 - [x] Adjust vault secret retrieval for v1 with role id & mount point (`${MOUNT}/${produit}/${vault_token}`)
 - [x] Adjust timing for API calls for scale (1 second delay is too long)
-- [ ] Add way to define access token (for apps)
+- [x] Add way to define access token (for apps)
 - [ ] Update flags to better match other tooling (gh-migrate-deploy-hooks)
 - [x] Remove requirement for destination org (assume updating instead of cloning)
