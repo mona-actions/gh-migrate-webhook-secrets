@@ -69,6 +69,15 @@ var (
 	}
 )
 
+type ApiResponse struct {
+	Rate struct {
+		Limit     int
+		Remaining int
+		Reset     int
+		Used      int
+	}
+}
+
 type Organization struct {
 	Login string
 }
@@ -185,6 +194,30 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 		opts.AuthToken = token
 	}
 	return opts
+}
+
+func ValidateApiRate(client api.RESTClient) (err error) {
+	apiResponse := ApiResponse{}
+	sp.Suffix = " validating API rate limits"
+	attempts := 0
+	for {
+		if attempts >= 240 {
+			return errors.New("After an hour of retrying, the API rate limit has not refreshed. Aborting.")
+		}
+		err = client.Get("rate_limit", &apiResponse)
+		if err != nil {
+			return err
+		}
+		// validate there is rate left
+		if apiResponse.Rate.Remaining <= 0 {
+			attempts++
+			sp.Suffix = " API rate limit has none remaining. Sleeping for 15 seconds (attempt #" + strconv.Itoa(attempts) + ")"
+			time.Sleep(15 * time.Second)
+		} else {
+			break
+		}
+	}
+	return err
 }
 
 // Gets an auth token from VAULT_ROLE_ID and VAULT_SECRET_ID
@@ -393,10 +426,22 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	// Start the spinner in the CLI
 	sp.Start()
 
+	// validate connection and API limits. error is returned when API communication fails (not when rate exceeds)
+	err = ValidateApiRate(restClient)
+	if err != nil {
+		return err
+	}
+
 	// Loop through pages of repositories, waiting 1 second in between
 	repositories := []Repository{}
 	var i = 1
 	for {
+
+		// validate we have API attempts left
+		timeoutErr := ValidateApiRate(restClient)
+		if timeoutErr != nil {
+			return timeoutErr
+		}
 
 		// show a suffix next to the spinner for what we are curretnly doing
 		sp.Suffix = fmt.Sprintf(
@@ -446,6 +491,12 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			" fetching webhooks for %s",
 			repo.Name,
 		)
+
+		// validate we have API attempts left
+		timeoutErr := ValidateApiRate(restClient)
+		if timeoutErr != nil {
+			return timeoutErr
+		}
 
 		// query for the webhooks on this repository
 		err = restClient.Get("repos/"+repo.NameWithOwner+"/hooks", &webhooksResponse)
@@ -568,6 +619,12 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	// loop through all webhooks
 	var success = 0
 	for _, webhook := range webhooks {
+
+		// validate we have API attempts left
+		timeoutErr := ValidateApiRate(restClient)
+		if timeoutErr != nil {
+			return timeoutErr
+		}
 
 		// output what's current processing
 		sp.Suffix = fmt.Sprintf(
