@@ -69,13 +69,19 @@ var (
 	}
 )
 
+type RateResponse struct {
+	Limit     int
+	Remaining int
+	Reset     int
+	Used      int
+}
+
 type ApiResponse struct {
-	Rate struct {
-		Limit     int
-		Remaining int
-		Reset     int
-		Used      int
+	Resources struct {
+		Core    RateResponse
+		Graphql RateResponse
 	}
+	Rate RateResponse
 }
 
 type Organization struct {
@@ -196,7 +202,7 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 	return opts
 }
 
-func ValidateApiRate(client api.RESTClient) (err error) {
+func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 	apiResponse := ApiResponse{}
 	sp.Suffix = " validating API rate limits"
 	attempts := 0
@@ -208,10 +214,20 @@ func ValidateApiRate(client api.RESTClient) (err error) {
 		if err != nil {
 			return err
 		}
+		// choose which response to validate
+		rateRemaining := 0
+		switch {
+		default:
+			return errors.New("Invalid API request type provided: '" + requestType + "'")
+		case requestType == "core":
+			rateRemaining = apiResponse.Resources.Core.Remaining
+		case requestType == "graphql":
+			rateRemaining = apiResponse.Resources.Graphql.Remaining
+		}
 		// validate there is rate left
-		if apiResponse.Rate.Remaining <= 0 {
+		if rateRemaining <= 0 {
 			attempts++
-			sp.Suffix = " API rate limit has none remaining. Sleeping for 15 seconds (attempt #" + strconv.Itoa(attempts) + ")"
+			sp.Suffix = " API rate limit (" + requestType + ") has none remaining. Sleeping for 15 seconds (attempt #" + strconv.Itoa(attempts) + ")"
 			time.Sleep(15 * time.Second)
 		} else {
 			break
@@ -426,19 +442,13 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	// Start the spinner in the CLI
 	sp.Start()
 
-	// validate connection and API limits. error is returned when API communication fails (not when rate exceeds)
-	err = ValidateApiRate(restClient)
-	if err != nil {
-		return err
-	}
-
 	// Loop through pages of repositories, waiting 1 second in between
 	repositories := []Repository{}
 	var i = 1
 	for {
 
 		// validate we have API attempts left
-		timeoutErr := ValidateApiRate(restClient)
+		timeoutErr := ValidateApiRate(restClient, "graphql")
 		if timeoutErr != nil {
 			return timeoutErr
 		}
@@ -493,7 +503,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		)
 
 		// validate we have API attempts left
-		timeoutErr := ValidateApiRate(restClient)
+		timeoutErr := ValidateApiRate(restClient, "core")
 		if timeoutErr != nil {
 			return timeoutErr
 		}
@@ -614,14 +624,14 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	sp.Restart()
-	sp.Suffix = fmt.Sprintf("Beginning cloning of Webhooks...")
+	sp.Suffix = fmt.Sprintf(" beginning patching of Webhooks...")
 
 	// loop through all webhooks
 	var success = 0
 	for _, webhook := range webhooks {
 
 		// validate we have API attempts left
-		timeoutErr := ValidateApiRate(restClient)
+		timeoutErr := ValidateApiRate(restClient, "core")
 		if timeoutErr != nil {
 			return timeoutErr
 		}
