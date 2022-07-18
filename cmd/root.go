@@ -333,18 +333,11 @@ func GetVaultSecret(key string) (secret string, connErr error, pathErr error) {
 
 	if vaultKvv1 {
 		// query using kvv1
-		kvv1Response, pathErr := vaultClient.KVv1(vaultMountpoint).Get(context.Background(), "data/"+key)
+		kvv1Response, pathErr := vaultClient.KVv1(vaultMountpoint).Get(context.Background(), key)
 		if pathErr != nil {
 			return "", connErr, pathErr
 		}
-		secretResponse := kvv1Response.Data["data"]
-		for k, v := range secretResponse.(map[string]interface{}) {
-			if k == vaultValueKey {
-				secretInterface = v
-				foundKey = true
-				break
-			}
-		}
+		secretInterface, foundKey = kvv1Response.Data[vaultValueKey]
 
 	} else {
 		// query using kvv2
