@@ -81,7 +81,8 @@ type ApiResponse struct {
 		Core    RateResponse
 		Graphql RateResponse
 	}
-	Rate RateResponse
+	Message string
+	Rate    RateResponse
 }
 
 type Organization struct {
@@ -207,11 +208,20 @@ func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 	sp.Suffix = " validating API rate limits"
 	attempts := 0
 	for {
+
+		// after 240 attempts (1 hour), end the scrip.
 		if attempts >= 240 {
 			return errors.New("After an hour of retrying, the API rate limit has not refreshed. Aborting.")
 		}
+
+		// get the current rate liit left or error out if request fails
 		err = client.Get("rate_limit", &apiResponse)
 		if err != nil {
+			return err
+		}
+
+		// if rate limiting is disabled, do not proceed
+		if apiResponse.Message == "Rate limiting is not enabled." {
 			return err
 		}
 		// choose which response to validate
