@@ -698,6 +698,9 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			// update success count.
 			success++
 		}
+
+		// need to sleep after writes to avoid hitting the secondary rate limit
+		time.Sleep(1 * time.Second)
 	}
 	sp.Stop()
 
