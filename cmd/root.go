@@ -304,7 +304,7 @@ func GetVaultToken(client *vault.Client) (token string, err error) {
 			fmt.Sprint(
 				"No valid authentication was provided. Either 'VAULT_TOKEN' ",
 				"or  'VAULT_ROLE_ID' & 'VAULT_SECRET_ID' must be defined.",
-			)
+			),
 		)
 	}
 	return vaultToken, err
