@@ -198,7 +198,10 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 		CacheTTL:    time.Hour,
 	}
 	if token != "" {
-		opts.AuthToken = token
+		// opts.AuthToken = token
+		opts.Headers = map[string]string{
+			"Authorization": "Bearer " + token,
+		}
 	}
 	return opts
 }
@@ -207,6 +210,7 @@ func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 	apiResponse := ApiResponse{}
 	sp.Suffix = " validating API rate limits"
 	attempts := 0
+
 	for {
 
 		// after 240 attempts (1 hour), end the scrip.
