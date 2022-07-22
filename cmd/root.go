@@ -637,6 +637,11 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	var success = 0
 	for _, webhook := range webhooks {
 
+		// skip bad webhooks
+		if webhook.Config.Secret == "" {
+			continue
+		}
+
 		// validate we have API attempts left
 		timeoutErr := ValidateApiRate(restClient, "core")
 		if timeoutErr != nil {
