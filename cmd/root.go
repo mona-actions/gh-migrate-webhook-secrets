@@ -635,10 +635,12 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// loop through all webhooks
 	var success = 0
+	var failed = 0
 	for _, webhook := range webhooks {
 
 		// skip bad webhooks
 		if webhook.Config.Secret == "" {
+			failed++
 			continue
 		}
 
@@ -682,6 +684,8 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// validate the request worked.
 		if err != nil {
 
+			failed++
+
 			// stop and output the error
 			sp.Stop()
 			fmt.Println(red(err))
@@ -709,8 +713,13 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 	sp.Stop()
 
-	// send back result to user
-	fmt.Println("Successfully migrated secrets for " + strconv.Itoa(success) + " webhook(s).")
+	if failed > 0 {
+		fmt.Println(red("Failed to migrate secrets for " + strconv.Itoa(failed) + " webhook(s)"))
+	}
+
+	if success > 0 {
+		fmt.Println("Successfully migrated secrets for " + strconv.Itoa(success) + " webhook(s).")
+	}
 
 	return err
 }
