@@ -81,7 +81,8 @@ type ApiResponse struct {
 		Core    RateResponse
 		Graphql RateResponse
 	}
-	Rate RateResponse
+	Message string
+	Rate    RateResponse
 }
 
 type Organization struct {
@@ -197,7 +198,10 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 		CacheTTL:    time.Hour,
 	}
 	if token != "" {
-		opts.AuthToken = token
+		// opts.AuthToken = token
+		opts.Headers = map[string]string{
+			"Authorization": fmt.Sprint("Bearer ", token),
+		}
 	}
 	return opts
 }
@@ -206,19 +210,29 @@ func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 	apiResponse := ApiResponse{}
 	sp.Suffix = " validating API rate limits"
 	attempts := 0
+
 	for {
+
+		// after 240 attempts (1 hour), end the scrip.
 		if attempts >= 240 {
 			return errors.New("After an hour of retrying, the API rate limit has not refreshed. Aborting.")
 		}
+
+		// get the current rate liit left or error out if request fails
 		err = client.Get("rate_limit", &apiResponse)
 		if err != nil {
+			return err
+		}
+
+		// if rate limiting is disabled, do not proceed
+		if apiResponse.Message == "Rate limiting is not enabled." {
 			return err
 		}
 		// choose which response to validate
 		rateRemaining := 0
 		switch {
 		default:
-			return errors.New("Invalid API request type provided: '" + requestType + "'")
+			return errors.New(fmt.Sprint("Invalid API request type provided: '", requestType, "'"))
 		case requestType == "core":
 			rateRemaining = apiResponse.Resources.Core.Remaining
 		case requestType == "graphql":
@@ -227,7 +241,11 @@ func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 		// validate there is rate left
 		if rateRemaining <= 0 {
 			attempts++
-			sp.Suffix = " API rate limit (" + requestType + ") has none remaining. Sleeping for 15 seconds (attempt #" + strconv.Itoa(attempts) + ")"
+			sp.Suffix = fmt.Sprint(
+				" API rate limit (", requestType, ") has none remaining. Sleeping for 15 seconds (attempt #",
+				strconv.Itoa(attempts),
+				")",
+			)
 			time.Sleep(15 * time.Second)
 		} else {
 			break
@@ -283,7 +301,10 @@ func GetVaultToken(client *vault.Client) (token string, err error) {
 	// validate a token exists
 	if vaultToken == "" {
 		err = errors.New(
-			"No valid authentication was provided. Either 'VAULT_TOKEN' or  'VAULT_ROLE_ID' & 'VAULT_SECRET_ID' must be defined.",
+			fmt.Sprint(
+				"No valid authentication was provided. Either 'VAULT_TOKEN' ",
+				"or  'VAULT_ROLE_ID' & 'VAULT_SECRET_ID' must be defined.",
+			),
 		)
 	}
 	return vaultToken, err
@@ -352,7 +373,7 @@ func GetVaultSecret(key string) (secret string, connErr error, pathErr error) {
 	if foundKey {
 		secretValue = secretInterface.(string)
 	} else {
-		pathErr = errors.New("Key '" + vaultValueKey + "' not found in secret.")
+		pathErr = errors.New(fmt.Sprint("Key '", vaultValueKey, "' not found in secret."))
 	}
 	return secretValue, connErr, pathErr
 }
@@ -393,20 +414,20 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// print out information about the process
 	fmt.Println()
-	fmt.Println(cyan("Host: ") + hostname)
-	fmt.Println(cyan("Organization: ") + organization)
+	fmt.Println(fmt.Sprint(cyan("Host: "), hostname))
+	fmt.Println(fmt.Sprint(cyan("Organization: "), organization))
 
 	vaultVersion := "2"
 	if vaultKvv1 {
 		vaultVersion = "1"
 	}
-	fmt.Println(cyan("Vault KV Version: ") + "v" + vaultVersion)
+	fmt.Println(fmt.Sprint(cyan("Vault KV Version: "), "v", vaultVersion))
 
 	if vaultMountpoint != "" {
-		fmt.Println(cyan("Vault Mount Point: ") + vaultMountpoint)
+		fmt.Println(fmt.Sprint(cyan("Vault Mount Point: "), vaultMountpoint))
 	}
 	if vaultPathKey != "" {
-		fmt.Println(cyan("Vault Path Key: ") + vaultPathKey)
+		fmt.Println(fmt.Sprint(cyan("Vault Path Key: "), vaultPathKey))
 	}
 
 	// test vault connection
@@ -502,7 +523,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		}
 
 		// query for the webhooks on this repository
-		err = restClient.Get("repos/"+repo.NameWithOwner+"/hooks", &webhooksResponse)
+		err = restClient.Get(fmt.Sprint("repos/", repo.NameWithOwner, "/hooks"), &webhooksResponse)
 		if err != nil {
 			return err
 		}
@@ -534,7 +555,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 					// loop pieces and find the value from the path key
 					for _, piece := range webhookParameters {
 						if strings.HasPrefix(piece, vaultPathKey) {
-							webhookSecretPath = strings.Replace(piece, vaultPathKey+"=", "", 1)
+							webhookSecretPath = strings.Replace(piece, fmt.Sprint(vaultPathKey, "="), "", 1)
 							break
 						}
 					}
@@ -604,10 +625,10 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 		messagePrefix := "Ready to apply secrets."
 		if missingSecrets > 0 {
-			messagePrefix = red(strconv.Itoa(missingSecrets) + " webhook(s) are missing secrets.")
+			messagePrefix = red(fmt.Sprint(missingSecrets, " webhook(s) are missing secrets."))
 		}
 
-		c := askForConfirmation(messagePrefix + " Are you sure you want to continue?")
+		c := askForConfirmation(fmt.Sprint(messagePrefix, " Are you sure you want to continue?"))
 		if !c {
 			fmt.Println()
 			fmt.Println("Process exited.")
@@ -621,7 +642,14 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// loop through all webhooks
 	var success = 0
+	var failed = 0
 	for _, webhook := range webhooks {
+
+		// skip bad webhooks
+		if webhook.Config.Secret == "" {
+			failed++
+			continue
+		}
 
 		// validate we have API attempts left
 		timeoutErr := ValidateApiRate(restClient, "core")
@@ -655,13 +683,23 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// post the request
 		webhookResponse := Webhook{}
 		err = restClient.Patch(
-			"repos/"+organization+"/"+webhook.Repository+"/hooks/"+strconv.Itoa(webhook.ID)+"/config",
+			fmt.Sprint(
+				"repos/",
+				organization,
+				"/",
+				webhook.Repository,
+				"/hooks/",
+				webhook.ID,
+				"/config",
+			),
 			reader,
 			&webhookResponse,
 		)
 
 		// validate the request worked.
 		if err != nil {
+
+			failed++
 
 			// stop and output the error
 			sp.Stop()
@@ -684,11 +722,19 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			// update success count.
 			success++
 		}
+
+		// need to sleep after writes to avoid hitting the secondary rate limit
+		time.Sleep(1 * time.Second)
 	}
 	sp.Stop()
 
-	// send back result to user
-	fmt.Println("Successfully migrated secrets for " + strconv.Itoa(success) + " webhook(s).")
+	if failed > 0 {
+		fmt.Println(red(fmt.Sprint("Failed to migrate secrets for ", failed, " webhook(s)")))
+	}
+
+	if success > 0 {
+		fmt.Println(fmt.Sprint("Successfully migrated secrets for ", success, " webhook(s)."))
+	}
 
 	return err
 }
