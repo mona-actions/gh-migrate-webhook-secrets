@@ -433,9 +433,11 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	case opts.AuthToken == "":
 		fmt.Println("Built-In")
 	case token != "" && strings.HasPrefix(token, "gho_"):
-		fmt.Println("OAuth")
+		fmt.Println("OAuth Token")
 	case token != "" && strings.HasPrefix(token, "ghp_"):
-		fmt.Println("PAT")
+		fmt.Println("Personal Access Token")
+	case token != "" && strings.HasPrefix(token, "ghs_"):
+		fmt.Println("App Token")
 	default:
 		fmt.Println("Unknown (couldn't detect type)")
 	}
