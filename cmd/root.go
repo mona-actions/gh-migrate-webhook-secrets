@@ -69,6 +69,10 @@ var (
 	}
 )
 
+type User struct {
+	Login string
+}
+
 type RateResponse struct {
 	Limit     int
 	Remaining int
@@ -198,9 +202,11 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 		CacheTTL:    time.Hour,
 	}
 	if token != "" {
-		// opts.AuthToken = token
+		opts.AuthToken = token
+		// bug: have to override header with "bearer" because "token" is used by default
+		// additionally, opts.AuthToken must be set or go-gh attempts to use built-in auth
 		opts.Headers = map[string]string{
-			"Authorization": fmt.Sprint("Bearer ", token),
+			"Authorization": fmt.Sprint("bearer ", token),
 		}
 	}
 	return opts
@@ -381,20 +387,6 @@ func GetVaultSecret(key string) (secret string, connErr error, pathErr error) {
 // GetUses returns GitHub Actions used in workflows
 func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
-	// get clients set-up with the source org hostname
-	opts := GetOpts(hostname)
-	restClient, restErr := gh.RESTClient(&opts)
-	if restErr != nil {
-		fmt.Println(red("Failed set set up REST client."))
-		return restErr
-	}
-
-	graphqlClient, graphqlErr := gh.GQLClient(&opts)
-	if graphqlErr != nil {
-		fmt.Println(red("Failed set set up GraphQL client."))
-		return graphqlErr
-	}
-
 	// create a regex filter to make sure http(s) isn't added
 	r, _ := regexp.Compile("^http(s|)://")
 
@@ -404,6 +396,26 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 	if organization == "" {
 		return fmt.Errorf("An organization must be provided.")
+	}
+
+	// get clients set-up with the source org hostname
+	opts := GetOpts(hostname)
+	restClient, restErr := gh.RESTClient(&opts)
+	if restErr != nil {
+		fmt.Println(red("Failed set set up REST client."))
+		return restErr
+	}
+
+	validateUser := User{}
+	validateErr := restClient.Get("user", &validateUser)
+	if validateErr != nil {
+		return validateErr
+	}
+
+	graphqlClient, graphqlErr := gh.GQLClient(&opts)
+	if graphqlErr != nil {
+		fmt.Println(red("Failed set set up GraphQL client."))
+		return graphqlErr
 	}
 	if os.Getenv("VAULT_ADDR") == "" {
 		return fmt.Errorf("A valid Vault address must be provided.")
@@ -415,6 +427,18 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	// print out information about the process
 	fmt.Println()
 	fmt.Println(fmt.Sprint(cyan("Host: "), hostname))
+	fmt.Println(fmt.Sprint(cyan("User: "), validateUser.Login))
+	fmt.Print(cyan("Auth Method: "))
+	switch {
+	case opts.AuthToken == "":
+		fmt.Println("Built-In")
+	case token != "" && strings.HasPrefix(token, "gho_"):
+		fmt.Println("OAuth")
+	case token != "" && strings.HasPrefix(token, "ghp_"):
+		fmt.Println("PAT")
+	default:
+		fmt.Println("Unknown (couldn't detect type)")
+	}
 	fmt.Println(fmt.Sprint(cyan("Organization: "), organization))
 
 	vaultVersion := "2"
@@ -444,7 +468,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		return err
 	}
 
-	fmt.Println()
 	fmt.Println()
 
 	// get our variables set up for the graphql query
