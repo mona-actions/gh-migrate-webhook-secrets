@@ -406,12 +406,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		return restErr
 	}
 
-	validateUser := User{}
-	validateErr := restClient.Get("user", &validateUser)
-	if validateErr != nil {
-		return validateErr
-	}
-
 	graphqlClient, graphqlErr := gh.GQLClient(&opts)
 	if graphqlErr != nil {
 		fmt.Println(red("Failed set set up GraphQL client."))
@@ -422,6 +416,17 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 	if os.Getenv("VAULT_TOKEN") == "" && (os.Getenv("VAULT_ROLE_ID") == "" || os.Getenv("VAULT_SECRET_ID") == "") {
 		return fmt.Errorf("You must provide a Vault token or Vault role ID and secret ID for authentication.")
+	}
+
+	// attempt to validate the auth session OR provided token if it isn't an APP token
+	validateUser := User{}
+	if strings.HasPrefix(token, "ghs_") {
+		validateUser.Login = "Unkown App"
+	} else {
+		validateErr := restClient.Get("user", &validateUser)
+		if validateErr != nil {
+			return validateErr
+		}
 	}
 
 	// print out information about the process
