@@ -73,6 +73,10 @@ type User struct {
 	Login string
 }
 
+type App struct {
+	Slug string
+}
+
 type RateResponse struct {
 	Limit     int
 	Remaining int
@@ -406,12 +410,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		return restErr
 	}
 
-	validateUser := User{}
-	validateErr := restClient.Get("user", &validateUser)
-	if validateErr != nil {
-		return validateErr
-	}
-
 	graphqlClient, graphqlErr := gh.GQLClient(&opts)
 	if graphqlErr != nil {
 		fmt.Println(red("Failed set set up GraphQL client."))
@@ -424,10 +422,30 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		return fmt.Errorf("You must provide a Vault token or Vault role ID and secret ID for authentication.")
 	}
 
+	// attempt to validate the auth session OR provided token if it isn't an APP token
+	validateUser := ""
+	if strings.HasPrefix(token, "ghs_") {
+		// Validate a non-user token
+		validateObject := App{}
+		validateErr := restClient.Get("app", &validateUser)
+		if validateErr != nil {
+			return validateErr
+		}
+		validateUser = validateObject.Slug
+	} else {
+		// validate an app token
+		validateObject := User{}
+		validateErr := restClient.Get("user", &validateObject)
+		if validateErr != nil {
+			return validateErr
+		}
+		validateUser = validateObject.Login
+	}
+
 	// print out information about the process
 	fmt.Println()
 	fmt.Println(fmt.Sprint(cyan("Host: "), hostname))
-	fmt.Println(fmt.Sprint(cyan("User: "), validateUser.Login))
+	fmt.Println(fmt.Sprint(cyan("User: "), validateUser))
 	fmt.Print(cyan("Auth Method: "))
 	switch {
 	case opts.AuthToken == "":
