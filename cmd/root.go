@@ -178,7 +178,7 @@ func ExitOnError(err error) {
 	}
 }
 
-func askForConfirmation(s string) bool {
+func AskForConfirmation(s string) bool {
 	// read the input
 	reader := bufio.NewReader(os.Stdin)
 	// loop until a response is valid
@@ -671,7 +671,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			messagePrefix = red(fmt.Sprint(missingSecrets, " webhook(s) are missing secrets."))
 		}
 
-		c := askForConfirmation(fmt.Sprint(messagePrefix, " Are you sure you want to continue?"))
+		c := AskForConfirmation(fmt.Sprint(messagePrefix, " Are you sure you want to continue?"))
 		if !c {
 			fmt.Println()
 			fmt.Println("Process exited.")
@@ -751,7 +751,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 			// if autoproceed is not enabled, prompt user
 			if !ignoreErrors {
-				c := askForConfirmation("Do you want to proceed?")
+				c := AskForConfirmation("Do you want to proceed?")
 				fmt.Println()
 				if !c {
 					fmt.Println("Process exited.")
