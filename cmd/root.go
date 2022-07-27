@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -178,7 +177,11 @@ func ExitOnError(err error) {
 	}
 }
 
-func AskForConfirmation(s string) bool {
+func Output(s string) {
+
+}
+
+func AskForConfirmation(s string) (res bool, err error) {
 	// read the input
 	reader := bufio.NewReader(os.Stdin)
 	// loop until a response is valid
@@ -186,13 +189,13 @@ func AskForConfirmation(s string) bool {
 		fmt.Printf("%s [y/n]: ", s)
 		response, err := reader.ReadString('\n')
 		if err != nil {
-			log.Fatal(err)
+			return false, err
 		}
 		response = strings.ToLower(strings.TrimSpace(response))
 		if response == "y" || response == "yes" {
-			return true
+			return true, err
 		} else if response == "n" || response == "no" {
-			return false
+			return false, err
 		}
 	}
 }
@@ -671,8 +674,10 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			messagePrefix = red(fmt.Sprint(missingSecrets, " webhook(s) are missing secrets."))
 		}
 
-		c := AskForConfirmation(fmt.Sprint(messagePrefix, " Are you sure you want to continue?"))
-		if !c {
+		c, err := AskForConfirmation(fmt.Sprint(messagePrefix, " Are you sure you want to continue?"))
+		if err != nil {
+			return err
+		} else if !c {
 			fmt.Println()
 			fmt.Println("Process exited.")
 			return err
@@ -751,11 +756,12 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 			// if autoproceed is not enabled, prompt user
 			if !ignoreErrors {
-				c := AskForConfirmation("Do you want to proceed?")
+				c, err := AskForConfirmation("Do you want to proceed?")
 				fmt.Println()
 				if !c {
+					fmt.Println()
 					fmt.Println("Process exited.")
-					os.Exit(1)
+					return err
 				}
 			}
 
