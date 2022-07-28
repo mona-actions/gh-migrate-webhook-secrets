@@ -753,8 +753,8 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		if missingSecrets > 0 {
 			messagePrefix = red(Debug(fmt.Sprint(missingSecrets, " webhook(s) are missing secrets.")))
 		}
-
-		c, err := AskForConfirmation(Debug(fmt.Sprint(messagePrefix, " Are you sure you want to continue?")))
+		proceedMessage := Debug("Are you sure you want to continue?")
+		c, err := AskForConfirmation(fmt.Sprint(messagePrefix, " ", proceedMessage))
 		if err != nil {
 			OutputError(err.Error(), true)
 		} else if !c {
