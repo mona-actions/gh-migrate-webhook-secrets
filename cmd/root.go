@@ -73,10 +73,6 @@ type User struct {
 	Login string
 }
 
-type App struct {
-	Slug string
-}
-
 type RateResponse struct {
 	Limit     int
 	Remaining int
@@ -210,7 +206,7 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 		// bug: have to override header with "bearer" because "token" is used by default
 		// additionally, opts.AuthToken must be set or go-gh attempts to use built-in auth
 		opts.Headers = map[string]string{
-			"Authorization": fmt.Sprint("bearer ", token),
+			"Authorization": fmt.Sprint("Token ", token),
 		}
 	}
 	return opts
@@ -424,15 +420,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// attempt to validate the auth session OR provided token if it isn't an APP token
 	validateUser := ""
-	if strings.HasPrefix(token, "ghs_") {
-		// Validate a non-user token
-		validateObject := App{}
-		validateErr := restClient.Get("app", &validateUser)
-		if validateErr != nil {
-			return validateErr
-		}
-		validateUser = validateObject.Slug
-	} else {
+	if !strings.HasPrefix(token, "ghs_") {
 		// validate an app token
 		validateObject := User{}
 		validateErr := restClient.Get("user", &validateObject)
@@ -445,11 +433,13 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	// print out information about the process
 	fmt.Println()
 	fmt.Println(fmt.Sprint(cyan("Host: "), hostname))
-	fmt.Println(fmt.Sprint(cyan("User: "), validateUser))
+	if validateUser != "" {
+		fmt.Println(fmt.Sprint(cyan("User: "), validateUser))
+	}
 	fmt.Print(cyan("Auth Method: "))
 	switch {
-	case opts.AuthToken == "":
-		fmt.Println("Built-In")
+	case token == "":
+		fmt.Println("CLI Pass-Through")
 	case token != "" && strings.HasPrefix(token, "gho_"):
 		fmt.Println("OAuth Token")
 	case token != "" && strings.HasPrefix(token, "ghp_"):
