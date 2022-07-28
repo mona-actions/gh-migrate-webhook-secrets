@@ -203,11 +203,6 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 	}
 	if token != "" {
 		opts.AuthToken = token
-		// bug: have to override header with "bearer" because "token" is used by default
-		// additionally, opts.AuthToken must be set or go-gh attempts to use built-in auth
-		opts.Headers = map[string]string{
-			"Authorization": fmt.Sprint("Token ", token),
-		}
 	}
 	return opts
 }
