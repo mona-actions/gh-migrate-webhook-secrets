@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -36,7 +35,9 @@ var (
 	vaultMountpoint string
 	vaultValueKey   string
 	vaultPathKey    string
+	vaultToken      string
 	vaultKvv1       = false
+	logFile         *os.File
 
 	// Create some colors and a spinner
 	hiBlack = color.New(color.FgHiBlack).SprintFunc()
@@ -174,7 +175,63 @@ func ExitOnError(err error) {
 	}
 }
 
-func askForConfirmation(s string) bool {
+func OutputNotice(message string) {
+	Output(message, "default", false, false)
+}
+
+func OutputError(message string, exit bool) {
+	Output(message, "red", true, exit)
+}
+
+func Output(message string, color string, isErr bool, exit bool) {
+
+	if isErr {
+		message = fmt.Sprint("[ERROR] ", message)
+	}
+	Log(message)
+
+	switch {
+	case color == "red":
+		message = red(message)
+	case color == "cyan":
+		message = cyan(message)
+	}
+	fmt.Println(message)
+	if exit {
+		os.Exit(1)
+	}
+}
+
+func Debug(message string) (passback string) {
+	Log(message)
+	passback = message
+	return passback
+}
+
+func Log(message string) {
+	if message != "" {
+		message = fmt.Sprint(
+			"[",
+			time.Now().Format("2006-01-02 15:04:05"),
+			"] ",
+			message,
+		)
+	}
+	_, err := logFile.WriteString(
+		fmt.Sprintln(message),
+	)
+	if err != nil {
+		fmt.Println(red("Unable to write to log file."))
+		fmt.Println(red(err))
+		os.Exit(1)
+	}
+}
+
+func LF() {
+	Output("", "default", false, false)
+}
+
+func AskForConfirmation(s string) (res bool, err error) {
 	// read the input
 	reader := bufio.NewReader(os.Stdin)
 	// loop until a response is valid
@@ -182,13 +239,13 @@ func askForConfirmation(s string) bool {
 		fmt.Printf("%s [y/n]: ", s)
 		response, err := reader.ReadString('\n')
 		if err != nil {
-			log.Fatal(err)
+			return false, err
 		}
 		response = strings.ToLower(strings.TrimSpace(response))
 		if response == "y" || response == "yes" {
-			return true
+			return true, err
 		} else if response == "n" || response == "no" {
-			return false
+			return false, err
 		}
 	}
 }
@@ -209,7 +266,7 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 
 func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 	apiResponse := ApiResponse{}
-	sp.Suffix = " validating API rate limits"
+	sp.Suffix = fmt.Sprint(" ", Debug("Validating API rate limits"))
 	attempts := 0
 
 	for {
@@ -243,9 +300,16 @@ func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 		if rateRemaining <= 0 {
 			attempts++
 			sp.Suffix = fmt.Sprint(
-				" API rate limit (", requestType, ") has none remaining. Sleeping for 15 seconds (attempt #",
-				strconv.Itoa(attempts),
-				")",
+				" ",
+				Debug(
+					fmt.Sprint(
+						"API rate limit (",
+						requestType,
+						") has none remaining. Sleeping for 15 seconds (attempt #",
+						strconv.Itoa(attempts),
+						")",
+					),
+				),
 			)
 			time.Sleep(15 * time.Second)
 		} else {
@@ -286,17 +350,22 @@ func AuthUser(vaultClient *vault.Client, roleId string, secretId string) (string
 
 func GetVaultToken(client *vault.Client) (token string, err error) {
 
+	Debug("Determining Vault authentication method...")
+
 	// Get security credentials from environment
-	vaultToken := os.Getenv("VAULT_TOKEN")
+	vaultToken = os.Getenv("VAULT_TOKEN")
 	vaultRoleId := os.Getenv("VAULT_ROLE_ID")
 	vaultSecretId := os.Getenv("VAULT_SECRET_ID")
 
 	// determine if we should auth with role id and secret id
 	if vaultRoleId != "" && vaultSecretId != "" {
+		Debug("Role ID and Secret ID provided. Authenticating and looking up token...")
 		vaultToken, err = AuthUser(client, vaultRoleId, vaultSecretId)
 		if err != nil {
 			return "", err
 		}
+	} else if vaultToken != "" {
+		Debug("Vault token manually provided.")
 	}
 
 	// validate a token exists
@@ -340,10 +409,12 @@ func GetVaultSecret(key string) (secret string, connErr error, pathErr error) {
 		return "", connErr, pathErr
 	}
 
-	// get the token
-	vaultToken, connErr := GetVaultToken(vaultClient)
-	if connErr != nil {
-		return "", connErr, pathErr
+	// get the token if one isn't already provided
+	if vaultToken == "" {
+		vaultToken, connErr = GetVaultToken(vaultClient)
+		if connErr != nil {
+			return "", connErr, pathErr
+		}
 	}
 
 	// authenticate
@@ -382,35 +453,38 @@ func GetVaultSecret(key string) (secret string, connErr error, pathErr error) {
 // GetUses returns GitHub Actions used in workflows
 func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
-	// create a regex filter to make sure http(s) isn't added
-	r, _ := regexp.Compile("^http(s|)://")
+	// Create log file
+	logFile, err = os.Create(fmt.Sprint(time.Now().Format("20060102_1504"), ".log"))
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
 
 	// validate flags provided
+	r, _ := regexp.Compile("^http(s|):(//|)")
 	if r.MatchString(hostname) {
-		return fmt.Errorf("Hostname contains http(s) prefix and should not.")
+		OutputError("Hostname contains http(s) prefix and should not.", true)
 	}
 	if organization == "" {
-		return fmt.Errorf("An organization must be provided.")
+		OutputError("An organization must be provided.", true)
 	}
 
 	// get clients set-up with the source org hostname
 	opts := GetOpts(hostname)
 	restClient, restErr := gh.RESTClient(&opts)
 	if restErr != nil {
-		fmt.Println(red("Failed set set up REST client."))
-		return restErr
+		OutputError("Failed to set up REST client. You must be logged in or provide a token.", true)
 	}
 
 	graphqlClient, graphqlErr := gh.GQLClient(&opts)
 	if graphqlErr != nil {
-		fmt.Println(red("Failed set set up GraphQL client."))
-		return graphqlErr
+		OutputError("Failed set set up GraphQL client.", true)
 	}
 	if os.Getenv("VAULT_ADDR") == "" {
-		return fmt.Errorf("A valid Vault address must be provided.")
+		OutputError("A valid Vault address must be provided.", true)
 	}
 	if os.Getenv("VAULT_TOKEN") == "" && (os.Getenv("VAULT_ROLE_ID") == "" || os.Getenv("VAULT_SECRET_ID") == "") {
-		return fmt.Errorf("You must provide a Vault token or Vault role ID and secret ID for authentication.")
+		OutputError("You must provide a Vault token or Vault role ID and secret ID for authentication.", true)
 	}
 
 	// attempt to validate the auth session OR provided token if it isn't an APP token
@@ -420,43 +494,44 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		validateObject := User{}
 		validateErr := restClient.Get("user", &validateObject)
 		if validateErr != nil {
-			return validateErr
+			OutputError(validateErr.Error(), true)
 		}
 		validateUser = validateObject.Login
 	}
 
 	// print out information about the process
-	fmt.Println()
-	fmt.Println(fmt.Sprint(cyan("Host: "), hostname))
+	LF()
+	OutputNotice(fmt.Sprint("Host: ", hostname))
 	if validateUser != "" {
-		fmt.Println(fmt.Sprint(cyan("User: "), validateUser))
+		OutputNotice(fmt.Sprint("User: ", validateUser))
 	}
-	fmt.Print(cyan("Auth Method: "))
+	authMethod := "Auth Method: "
 	switch {
 	case token == "":
-		fmt.Println("CLI Pass-Through")
+		authMethod += "CLI Pass-Through"
 	case token != "" && strings.HasPrefix(token, "gho_"):
-		fmt.Println("OAuth Token")
+		authMethod += "OAuth Token"
 	case token != "" && strings.HasPrefix(token, "ghp_"):
-		fmt.Println("Personal Access Token")
+		authMethod += "Personal Access Token"
 	case token != "" && strings.HasPrefix(token, "ghs_"):
-		fmt.Println("App Token")
+		authMethod += "App Token"
 	default:
-		fmt.Println("Unknown (couldn't detect type)")
+		authMethod += "Unknown (couldn't detect type)"
 	}
-	fmt.Println(fmt.Sprint(cyan("Organization: "), organization))
+	OutputNotice(authMethod)
+	OutputNotice(fmt.Sprint("Organization: ", organization))
 
 	vaultVersion := "2"
 	if vaultKvv1 {
 		vaultVersion = "1"
 	}
-	fmt.Println(fmt.Sprint(cyan("Vault KV Version: "), "v", vaultVersion))
+	OutputNotice(fmt.Sprint("Vault KV Version: ", "v", vaultVersion))
 
 	if vaultMountpoint != "" {
-		fmt.Println(fmt.Sprint(cyan("Vault Mount Point: "), vaultMountpoint))
+		OutputNotice(fmt.Sprint("Vault Mount Point: ", vaultMountpoint))
 	}
 	if vaultPathKey != "" {
-		fmt.Println(fmt.Sprint(cyan("Vault Path Key: "), vaultPathKey))
+		OutputNotice(fmt.Sprint("Vault Path Key: ", vaultPathKey))
 	}
 
 	// test vault connection
@@ -468,12 +543,11 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 	_, err = GetVaultToken(vaultClient)
 	if err != nil {
-		fmt.Println()
-		fmt.Println("Connection to Vault failed.")
-		return err
+		LF()
+		OutputError("Connection to Vault failed.", true)
 	}
 
-	fmt.Println()
+	LF()
 
 	// get our variables set up for the graphql query
 	variables := map[string]interface{}{
@@ -492,14 +566,21 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// validate we have API attempts left
 		timeoutErr := ValidateApiRate(restClient, "graphql")
 		if timeoutErr != nil {
-			return timeoutErr
+			OutputError(timeoutErr.Error(), true)
 		}
 
 		// show a suffix next to the spinner for what we are curretnly doing
-		sp.Suffix = fmt.Sprintf(
-			" fetching repositories from %s %s",
-			organization,
-			hiBlack(fmt.Sprintf("(page %d)", i)),
+		sp.Suffix = fmt.Sprint(
+			" ",
+			Debug(
+				fmt.Sprint(
+					"Fetching repositories from ",
+					organization,
+					" (page ",
+					i,
+					")",
+				),
+			),
 		)
 
 		// make the graphql request
@@ -519,7 +600,10 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	// set up table header for displaying of data
-	sp.Suffix = fmt.Sprintf(" creating table data for display.")
+	sp.Suffix = fmt.Sprint(
+		" ",
+		Debug("Creating table data for display."),
+	)
 	var td = pterm.TableData{
 		{
 			"Repository",
@@ -539,21 +623,26 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		webhooksResponse := []Webhook{}
 
 		// print out current repository information
-		sp.Suffix = fmt.Sprintf(
-			" fetching webhooks for %s",
-			repo.Name,
+		sp.Suffix = fmt.Sprint(
+			" ",
+			Debug(
+				fmt.Sprint(
+					"Fetching webhooks for ",
+					repo.Name,
+				),
+			),
 		)
 
 		// validate we have API attempts left
 		timeoutErr := ValidateApiRate(restClient, "core")
 		if timeoutErr != nil {
-			return timeoutErr
+			OutputError(timeoutErr.Error(), true)
 		}
 
 		// query for the webhooks on this repository
 		err = restClient.Get(fmt.Sprint("repos/", repo.NameWithOwner, "/hooks"), &webhooksResponse)
 		if err != nil {
-			return err
+			OutputError(err.Error(), true)
 		}
 
 		// add the webhooks to the table data for visibility
@@ -590,7 +679,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 				} else {
 					missingSecrets++
-					webhookSecretFound = red("No parameters found in Webhook URL")
+					webhookSecretFound = "No parameters found in Webhook URL"
 					webhookLookupSecret = false
 				}
 			}
@@ -598,21 +687,28 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			// only lookup when the previous step hasn't failed
 			if webhookLookupSecret {
 				// try to get the webhook secret value from Vault
-				sp.Suffix = fmt.Sprintf(
-					" getting secret for webhook %s in repository %s",
-					webhook.Config.URL,
-					webhook.Repository,
+				sp.Suffix = fmt.Sprint(
+					" ",
+					Debug(
+						fmt.Sprintf(
+							"Getting secret for webhook ID %s in repository %s",
+							strconv.Itoa(webhook.ID),
+							webhook.Repository,
+						),
+					),
 				)
 				foundSecret, connErr, keyErr := GetVaultSecret(webhookSecretPath)
 				if connErr != nil {
 					sp.Stop()
-					return connErr
+					OutputError(connErr.Error(), true)
 				} else if keyErr != nil {
 					missingSecrets++
-					webhookSecretFound = red(keyErr)
+					webhookSecretFound = keyErr.Error()
 				}
 				webhook.Config.Secret = foundSecret
 			}
+
+			Debug(fmt.Sprint("Secret look-up results: ", webhookSecretFound))
 
 			// modify output when a secret is not found
 			if webhook.Config.Secret == "" {
@@ -620,6 +716,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 				webhookId = red(webhookId)
 				webhookUrl = red(webhookUrl)
 				webhookSecretPath = red(webhookSecretPath)
+				webhookSecretFound = red(webhookSecretFound)
 			}
 
 			// overwrite the webhook at the index in the array
@@ -643,30 +740,35 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	sp.Stop()
 
 	// show the results
-	fmt.Println(cyan("Webhooks Found: "))
-	fmt.Println()
+	OutputNotice("Webhooks Found: ")
+	LF()
+	// output table
 	pterm.DefaultTable.WithHasHeader().WithHeaderRowSeparator("-").WithData(td).Render()
-	fmt.Println()
+	LF()
 
 	// confirm the executor wants to proceed
 	if !confirm {
 
 		messagePrefix := "Ready to apply secrets."
 		if missingSecrets > 0 {
-			messagePrefix = red(fmt.Sprint(missingSecrets, " webhook(s) are missing secrets."))
+			messagePrefix = red(Debug(fmt.Sprint(missingSecrets, " webhook(s) are missing secrets.")))
 		}
-
-		c := askForConfirmation(fmt.Sprint(messagePrefix, " Are you sure you want to continue?"))
-		if !c {
-			fmt.Println()
-			fmt.Println("Process exited.")
-			return err
+		proceedMessage := Debug("Are you sure you want to continue?")
+		c, err := AskForConfirmation(fmt.Sprint(messagePrefix, " ", proceedMessage))
+		if err != nil {
+			OutputError(err.Error(), true)
+		} else if !c {
+			LF()
+			OutputError("Process exited.", true)
 		}
-		fmt.Println()
+		LF()
 	}
 
 	sp.Restart()
-	sp.Suffix = fmt.Sprintf(" beginning patching of Webhooks...")
+	sp.Suffix = fmt.Sprint(
+		" ",
+		Debug("Beginning patching of Webhooks..."),
+	)
 
 	// loop through all webhooks
 	var success = 0
@@ -676,20 +778,26 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// skip bad webhooks
 		if webhook.Config.Secret == "" {
 			failed++
+			Debug("Skipping webhook because no secret value was found.")
 			continue
 		}
 
 		// validate we have API attempts left
 		timeoutErr := ValidateApiRate(restClient, "core")
 		if timeoutErr != nil {
-			return timeoutErr
+			OutputError(timeoutErr.Error(), true)
 		}
 
 		// output what's current processing
-		sp.Suffix = fmt.Sprintf(
-			" creating webhook to %s in repository %s",
-			webhook.Config.URL,
-			webhook.Repository,
+		sp.Suffix = fmt.Sprint(
+			" ",
+			Debug(
+				fmt.Sprintf(
+					"Creating webhook to %s in repository %s",
+					webhook.Config.URL,
+					webhook.Repository,
+				),
+			),
 		)
 
 		// set up the encoding reader from the current webhook
@@ -704,7 +812,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		data, err := json.Marshal(&webhookToUpdate)
 		if err != nil {
 			sp.Stop()
-			return err
+			OutputError(err.Error(), true)
 		}
 		reader := bytes.NewReader(data)
 
@@ -731,16 +839,19 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 			// stop and output the error
 			sp.Stop()
-			fmt.Println(red(err))
-			fmt.Println()
+			OutputError(err.Error(), false)
+			LF()
 
 			// if autoproceed is not enabled, prompt user
 			if !ignoreErrors {
-				c := askForConfirmation("Do you want to proceed?")
-				fmt.Println()
+				c, err := AskForConfirmation("Do you want to proceed?")
+				LF()
+				if err != nil {
+					OutputError(err.Error(), true)
+				}
 				if !c {
-					fmt.Println("Process exited.")
-					os.Exit(1)
+					LF()
+					OutputError("Process exited.", true)
 				}
 			}
 
@@ -748,6 +859,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			sp.Start()
 		} else {
 			// update success count.
+			Debug("Successfully updated secret.")
 			success++
 		}
 
@@ -757,11 +869,11 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	sp.Stop()
 
 	if failed > 0 {
-		fmt.Println(red(fmt.Sprint("Failed to migrate secrets for ", failed, " webhook(s)")))
+		OutputError(fmt.Sprint("Failed to migrate secrets for ", failed, " webhook(s)"), false)
 	}
 
 	if success > 0 {
-		fmt.Println(fmt.Sprint("Successfully migrated secrets for ", success, " webhook(s)."))
+		OutputNotice(fmt.Sprint("Successfully migrated secrets for ", success, " webhook(s)."))
 	}
 
 	return err
