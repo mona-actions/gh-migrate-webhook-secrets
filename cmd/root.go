@@ -188,6 +188,7 @@ func OutputNotice(message string) {
 }
 
 func OutputError(message string, exit bool) {
+	sp.Stop()
 	Output(message, "red", true, exit)
 }
 
@@ -210,10 +211,17 @@ func Output(message string, color string, isErr bool, exit bool) {
 	}
 }
 
-func Debug(message string) (passback string) {
+func DebugAndStatus(message string) string {
+	sp.Suffix = fmt.Sprint(
+		" ",
+		message,
+	)
+	return Debug(message)
+}
+
+func Debug(message string) string {
 	Log(message)
-	passback = message
-	return passback
+	return message
 }
 
 func Log(message string) {
@@ -237,6 +245,10 @@ func Log(message string) {
 
 func LF() {
 	Output("", "default", false, false)
+}
+
+func LogLF() {
+	Log("")
 }
 
 func AskForConfirmation(s string) (res bool, err error) {
@@ -275,7 +287,6 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 
 func ValidateApiRate(requestType string) (err error) {
 	apiResponse := ApiResponse{}
-	sp.Suffix = fmt.Sprint(" ", Debug("Validating API rate limits"))
 	attempts := 0
 
 	for {
@@ -310,16 +321,11 @@ func ValidateApiRate(requestType string) (err error) {
 		// validate there is rate left
 		if rateRemaining <= 0 {
 			attempts++
-			sp.Suffix = fmt.Sprint(
-				" ",
-				Debug(
-					fmt.Sprint(
-						"API rate limit (",
-						requestType,
-						") has none remaining. Sleeping for 15 seconds (attempt #",
-						strconv.Itoa(attempts),
-						")",
-					),
+			DebugAndStatus(
+				fmt.Sprintf(
+					"API rate limit (%s) has none remaining. Sleeping for 15 seconds (attempt #%d)",
+					requestType,
+					attempts,
 				),
 			)
 			time.Sleep(15 * time.Second)
@@ -361,7 +367,7 @@ func AuthUser(vaultClient *vault.Client, roleId string, secretId string) (string
 
 func GetVaultToken(client *vault.Client) (token string, err error) {
 
-	Debug("Determining Vault authentication method...")
+	DebugAndStatus("Determining Vault authentication method...")
 
 	// Get security credentials from environment
 	vaultToken = os.Getenv("VAULT_TOKEN")
@@ -467,13 +473,10 @@ func LookupWebhooks(repository Repository) {
 	webhooksResponse := []Webhook{}
 
 	// print out current repository information
-	sp.Suffix = fmt.Sprint(
-		" ",
-		Debug(
-			fmt.Sprint(
-				"Fetching webhooks for ",
-				repository.Name,
-			),
+	Debug(
+		fmt.Sprintf(
+			"Fetching webhooks for repository '%s'...",
+			repository.Name,
 		),
 	)
 
@@ -487,6 +490,10 @@ func LookupWebhooks(repository Repository) {
 	err := restClient.Get(fmt.Sprint("repos/", repository.NameWithOwner, "/hooks"), &webhooksResponse)
 	if err != nil {
 		OutputError(err.Error(), true)
+	}
+
+	if len(webhooksResponse) == 0 {
+		Debug(fmt.Sprintf("No webhooks found for repository '%s'.", repository.Name))
 	}
 
 	// add the webhooks to the table data for visibility
@@ -525,29 +532,40 @@ func LookupWebhooks(repository Repository) {
 				missingSecrets++
 				webhookSecretFound = "No parameters found in Webhook URL"
 				webhookLookupSecret = false
+				Debug(
+					fmt.Sprintf(
+						"Webhook ID %d: Vault path key provided (%s), but no matching key-value was found in webhook URL (%s)",
+						webhook.ID,
+						vaultPathKey,
+						webhookUrl,
+					),
+				)
 			}
 		}
 
 		// only lookup when the previous step hasn't failed
 		if webhookLookupSecret {
-			// try to get the webhook secret value from Vault
-			sp.Suffix = fmt.Sprint(
-				" ",
-				Debug(
-					fmt.Sprintf(
-						"Getting secret for webhook ID %s in repository %s",
-						strconv.Itoa(webhook.ID),
-						webhook.Repository,
-					),
+			Debug(
+				fmt.Sprintf(
+					"Webhook ID %d: Looking up vault secret at %s...",
+					webhook.ID,
+					webhookSecretPath,
 				),
 			)
+			// try to get the webhook secret value from Vault
 			foundSecret, connErr, keyErr := GetVaultSecret(webhookSecretPath)
 			if connErr != nil {
-				sp.Stop()
 				OutputError(connErr.Error(), true)
 			} else if keyErr != nil {
 				missingSecrets++
 				webhookSecretFound = keyErr.Error()
+				Debug(
+					fmt.Sprintf(
+						"[ERROR] Webhook ID %d: %s",
+						webhook.ID,
+						webhookSecretFound,
+					),
+				)
 			}
 			webhook.Config.Secret = foundSecret
 		}
@@ -561,6 +579,19 @@ func LookupWebhooks(repository Repository) {
 			webhookUrl = red(webhookUrl)
 			webhookSecretPath = red(webhookSecretPath)
 			webhookSecretFound = red(webhookSecretFound)
+			Debug(
+				fmt.Sprintf(
+					"[ERROR] Webhook ID %d: no secret found or value was empty.",
+					webhook.ID,
+				),
+			)
+		} else {
+			Debug(
+				fmt.Sprintf(
+					"Webhook ID %d: Found secret.",
+					webhook.ID,
+				),
+			)
 		}
 
 		// overwrite the webhook at the index in the array
@@ -592,6 +623,10 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		return err
 	}
 	defer logFile.Close()
+
+	LogLF()
+	Debug("---- VALIDATING FLAGS & ENV VARS ----")
+	LogLF()
 
 	// validate flags provided
 	r, _ := regexp.Compile("^http(s|):(//|)")
@@ -635,7 +670,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	// print out information about the process
-	LF()
 	OutputNotice(fmt.Sprint("Host: ", hostname))
 	if validateUser != "" {
 		OutputNotice(fmt.Sprint("User: ", validateUser))
@@ -693,6 +727,10 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	// Start the spinner in the CLI
 	sp.Start()
 
+	LogLF()
+	Debug("---- LISTING REPOSITORIES ----")
+	LogLF()
+
 	// Loop through pages of repositories, waiting 1 second in between
 	var i = 1
 	for {
@@ -704,16 +742,11 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		}
 
 		// show a suffix next to the spinner for what we are curretnly doing
-		sp.Suffix = fmt.Sprint(
-			" ",
-			Debug(
-				fmt.Sprint(
-					"Fetching repositories from ",
-					organization,
-					" (page ",
-					i,
-					")",
-				),
+		DebugAndStatus(
+			fmt.Sprintf(
+				"Fetching repositories from organization '%s' (page %d)",
+				organization,
+				i,
 			),
 		)
 
@@ -733,11 +766,12 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		variables["page"] = &orgRepositoriesQuery.Organization.Repositories.PageInfo.EndCursor
 	}
 
+	LogLF()
+	Debug("---- GETTING ALL WEBHOOKS ----")
+	LogLF()
+
 	// set up table header for displaying of data
-	sp.Suffix = fmt.Sprint(
-		" ",
-		Debug("Creating table data for display."),
-	)
+	Debug("Creating table data for display...")
 	webhookResultsTable = pterm.TableData{
 		{
 			"Repository",
@@ -756,7 +790,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	Debug("Batching repository webhook reads...")
 	batchNum := 1
 	for len(repositoriesToProcess) > 0 {
-		Debug(fmt.Sprintf("Starting batch #%d", batchNum))
 		// adjust number of threads
 		if len(repositoriesToProcess) < maxRepoThreads {
 			Debug(
@@ -768,6 +801,13 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			)
 			maxRepoThreads = len(repositoriesToProcess)
 		}
+		DebugAndStatus(
+			fmt.Sprintf(
+				"Running webhook lookup batch #%d (%d threads)...",
+				batchNum,
+				maxRepoThreads,
+			),
+		)
 		// create our batch to process from the first X elements
 		batch := repositoriesToProcess[:maxRepoThreads]
 		Debug(fmt.Sprintf("Repositories in this batch: %d", len(batch)))
@@ -786,10 +826,10 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		for i := 0; i < len(batch); i++ {
 			Debug(
 				fmt.Sprintf(
-					"Launching webhooks lookup go routine (%d of %d) for repository '%s'",
+					"Running thread %d of %d for webhook lookup on repository '%s'",
 					i+1,
 					len(batch),
-					batch[i].NameWithOwner,
+					batch[i].Name,
 				),
 			)
 			go LookupWebhooks(batch[i])
@@ -815,7 +855,11 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 		messagePrefix := "Ready to apply secrets."
 		if missingSecrets > 0 {
-			messagePrefix = red(Debug(fmt.Sprint(missingSecrets, " webhook(s) are missing secrets.")))
+			messagePrefix = red(
+				Debug(
+					fmt.Sprint(missingSecrets, " webhook(s) are missing secrets."),
+				),
+			)
 		}
 		proceedMessage := Debug("Are you sure you want to continue?")
 		c, err := AskForConfirmation(fmt.Sprint(messagePrefix, " ", proceedMessage))
@@ -829,10 +873,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	sp.Restart()
-	sp.Suffix = fmt.Sprint(
-		" ",
-		Debug("Beginning patching of Webhooks..."),
-	)
+	Debug("---- PATCHING WEBHOOKS ----")
 
 	// loop through all webhooks
 	var success = 0
@@ -842,7 +883,12 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// skip bad webhooks
 		if webhook.Config.Secret == "" {
 			failed++
-			Debug("Skipping webhook because no secret value was found.")
+			Debug(
+				fmt.Sprintf(
+					"Skipping webhook ID %d because no secret value was found.",
+					webhook.ID,
+				),
+			)
 			continue
 		}
 
@@ -853,14 +899,10 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		}
 
 		// output what's current processing
-		sp.Suffix = fmt.Sprint(
-			" ",
-			Debug(
-				fmt.Sprintf(
-					"Creating webhook to %s in repository %s",
-					webhook.Config.URL,
-					webhook.Repository,
-				),
+		Debug(
+			fmt.Sprintf(
+				"Patching webhook ID %d...",
+				webhook.ID,
 			),
 		)
 
@@ -923,7 +965,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			sp.Start()
 		} else {
 			// update success count.
-			Debug("Successfully updated secret.")
+			Debug(fmt.Sprintf("Successfully updated secret ID %d", webhook.ID))
 			success++
 		}
 
@@ -933,11 +975,22 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	sp.Stop()
 
 	if failed > 0 {
-		OutputError(fmt.Sprint("Failed to migrate secrets for ", failed, " webhook(s)"), false)
+		OutputError(
+			fmt.Sprintf(
+				"Failed to migrate secrets for %d webhook(s)",
+				failed,
+			),
+			false,
+		)
 	}
 
 	if success > 0 {
-		OutputNotice(fmt.Sprint("Successfully migrated secrets for ", success, " webhook(s)."))
+		OutputNotice(
+			fmt.Sprintf(
+				"Successfully migrated secrets for %d webhook(s).",
+				success,
+			),
+		)
 	}
 
 	return err
