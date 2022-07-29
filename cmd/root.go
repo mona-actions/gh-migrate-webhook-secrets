@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/briandowns/spinner"
@@ -26,18 +27,24 @@ import (
 var (
 
 	// Set up main variables
-	noCache         = false
-	confirm         = false
-	ignoreErrors    = false
-	hostname        string
-	organization    string
-	token           string
-	vaultMountpoint string
-	vaultValueKey   string
-	vaultPathKey    string
-	vaultToken      string
-	vaultKvv1       = false
-	logFile         *os.File
+	noCache             = false
+	confirm             = false
+	ignoreErrors        = false
+	hostname            string
+	organization        string
+	token               string
+	vaultMountpoint     string
+	vaultValueKey       string
+	vaultPathKey        string
+	vaultToken          string
+	vaultKvv1           = false
+	logFile             *os.File
+	maxThreads          int
+	repositories        []Repository = []Repository{}
+	webhooks            []Webhook    = []Webhook{}
+	webhookResultsTable pterm.TableData
+	waitGroup           sync.WaitGroup
+	missingSecrets      int = 0
 
 	// Create some colors and a spinner
 	hiBlack = color.New(color.FgHiBlack).SprintFunc()
@@ -147,6 +154,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&hostname, "hostname", "github.com", "GitHub hostname")
 	rootCmd.PersistentFlags().StringVar(&organization, "org", "", "Organization name")
 	rootCmd.PersistentFlags().StringVar(&token, "token", "", "Optional token for authentication (uses GitHub CLI built-in authentication)")
+	rootCmd.PersistentFlags().IntVar(&maxThreads, "threads", 10, "Number of threads to process at a time. WARNING: could have detrimental effects on your API rate limit.")
 
 	// vault flags
 	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "secret", "The mount point of the secrets on the Vault server")
@@ -265,7 +273,7 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 	return opts
 }
 
-func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
+func ValidateApiRate(requestType string) (err error) {
 	apiResponse := ApiResponse{}
 	sp.Suffix = fmt.Sprint(" ", Debug("Validating API rate limits"))
 	attempts := 0
@@ -278,7 +286,7 @@ func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 		}
 
 		// get the current rate liit left or error out if request fails
-		err = client.Get("rate_limit", &apiResponse)
+		err = restClient.Get("rate_limit", &apiResponse)
 		if err != nil {
 			Debug("Failed to get rate limit from GitHub server.")
 			return err
@@ -453,11 +461,133 @@ func GetVaultSecret(key string) (secret string, connErr error, pathErr error) {
 	return secretValue, connErr, pathErr
 }
 
+func LookupWebhooks(repository Repository) {
+
+	// set a var to store the webhook array in
+	webhooksResponse := []Webhook{}
+
+	// print out current repository information
+	sp.Suffix = fmt.Sprint(
+		" ",
+		Debug(
+			fmt.Sprint(
+				"Fetching webhooks for ",
+				repository.Name,
+			),
+		),
+	)
+
+	// validate we have API attempts left
+	timeoutErr := ValidateApiRate("core")
+	if timeoutErr != nil {
+		OutputError(timeoutErr.Error(), true)
+	}
+
+	// query for the webhooks on this repository
+	err := restClient.Get(fmt.Sprint("repos/", repository.NameWithOwner, "/hooks"), &webhooksResponse)
+	if err != nil {
+		OutputError(err.Error(), true)
+	}
+
+	// add the webhooks to the table data for visibility
+	for i, webhook := range webhooksResponse {
+		// add the repo name the webhook
+		webhook.Repository = repository.Name
+
+		// set variables for looking up secrets
+		webhookLookupSecret := true
+		webhookSecretPath := repository.Name
+
+		// set display variables
+		webhookName := repository.Name
+		webhookId := strconv.Itoa(webhook.ID)
+		webhookUrl := webhook.Config.URL
+		webhookSecretFound := "Yes"
+
+		// try to parse the webhook path from the URL the vault-path-key flag is provided
+		if vaultPathKey != "" {
+
+			// make sure URL contains the path key and split the URL by ?
+			webhookUrlPieces := strings.Split(webhook.Config.URL, "?")
+			if strings.Contains(webhook.Config.URL, vaultPathKey) && len(webhookUrlPieces) == 2 {
+
+				// split the URL parameters by &
+				webhookParameters := strings.Split(webhookUrlPieces[1], "&")
+				// loop pieces and find the value from the path key
+				for _, piece := range webhookParameters {
+					if strings.HasPrefix(piece, vaultPathKey) {
+						webhookSecretPath = strings.Replace(piece, fmt.Sprint(vaultPathKey, "="), "", 1)
+						break
+					}
+				}
+
+			} else {
+				missingSecrets++
+				webhookSecretFound = "No parameters found in Webhook URL"
+				webhookLookupSecret = false
+			}
+		}
+
+		// only lookup when the previous step hasn't failed
+		if webhookLookupSecret {
+			// try to get the webhook secret value from Vault
+			sp.Suffix = fmt.Sprint(
+				" ",
+				Debug(
+					fmt.Sprintf(
+						"Getting secret for webhook ID %s in repository %s",
+						strconv.Itoa(webhook.ID),
+						webhook.Repository,
+					),
+				),
+			)
+			foundSecret, connErr, keyErr := GetVaultSecret(webhookSecretPath)
+			if connErr != nil {
+				sp.Stop()
+				OutputError(connErr.Error(), true)
+			} else if keyErr != nil {
+				missingSecrets++
+				webhookSecretFound = keyErr.Error()
+			}
+			webhook.Config.Secret = foundSecret
+		}
+
+		Debug(fmt.Sprint("Secret look-up results: ", webhookSecretFound))
+
+		// modify output when a secret is not found
+		if webhook.Config.Secret == "" {
+			webhookName = red(webhookName)
+			webhookId = red(webhookId)
+			webhookUrl = red(webhookUrl)
+			webhookSecretPath = red(webhookSecretPath)
+			webhookSecretFound = red(webhookSecretFound)
+		}
+
+		// overwrite the webhook at the index in the array
+		webhooksResponse[i] = webhook
+
+		// add to table data
+		webhookResultsTable = append(webhookResultsTable, []string{
+			webhookName,
+			webhookId,
+			webhookUrl,
+			webhookSecretPath,
+			webhookSecretFound,
+		})
+	}
+
+	// append to the list of webooks
+	webhooks = append(webhooks, webhooksResponse...)
+
+	// close out this thread
+	waitGroup.Done()
+}
+
 // GetUses returns GitHub Actions used in workflows
 func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// Create log file
-	logFile, err = os.Create(fmt.Sprint(time.Now().Format("20060102_1504"), ".log"))
+	logFile, err = os.Create(fmt.Sprint(time.Now().Format("20060102_150401"), ".log"))
 	if err != nil {
 		return err
 	}
@@ -474,13 +604,15 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// get clients set-up with the source org hostname
 	opts := GetOpts(hostname)
-	restClient, restErr := gh.RESTClient(&opts)
-	if restErr != nil {
+	restClient, err = gh.RESTClient(&opts)
+	if err != nil {
+		Debug(fmt.Sprint("Error object: ", err))
 		OutputError("Failed to set up REST client. You must be logged in or provide a token.", true)
 	}
 
-	graphqlClient, graphqlErr := gh.GQLClient(&opts)
-	if graphqlErr != nil {
+	graphqlClient, err := gh.GQLClient(&opts)
+	if err != nil {
+		Debug(fmt.Sprint("Error object: ", err))
 		OutputError("Failed set set up GraphQL client.", true)
 	}
 	if os.Getenv("VAULT_ADDR") == "" {
@@ -562,12 +694,11 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	sp.Start()
 
 	// Loop through pages of repositories, waiting 1 second in between
-	repositories := []Repository{}
 	var i = 1
 	for {
 
 		// validate we have API attempts left
-		timeoutErr := ValidateApiRate(restClient, "graphql")
+		timeoutErr := ValidateApiRate("graphql")
 		if timeoutErr != nil {
 			OutputError(timeoutErr.Error(), true)
 		}
@@ -607,7 +738,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		" ",
 		Debug("Creating table data for display."),
 	)
-	var td = pterm.TableData{
+	webhookResultsTable = pterm.TableData{
 		{
 			"Repository",
 			"ID",
@@ -617,126 +748,55 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		},
 	}
 
-	// Loop through repositories and get webhooks
-	webhooks := []Webhook{}
-	var missingSecrets = 0
-	for _, repo := range repositories {
+	// set some vars that can be adjusted in looping
+	repositoriesToProcess := repositories
+	maxRepoThreads := maxThreads
 
-		// set a var to store the webhook array in
-		webhooksResponse := []Webhook{}
-
-		// print out current repository information
-		sp.Suffix = fmt.Sprint(
-			" ",
+	// do this while there are elements left
+	Debug("Batching repository webhook reads...")
+	batchNum := 1
+	for len(repositoriesToProcess) > 0 {
+		Debug(fmt.Sprintf("Starting batch #%d", batchNum))
+		// adjust number of threads
+		if len(repositoriesToProcess) < maxRepoThreads {
 			Debug(
-				fmt.Sprint(
-					"Fetching webhooks for ",
-					repo.Name,
+				fmt.Sprintf(
+					"Setting number of threads to %d because there are only %d repositories left.",
+					len(repositoriesToProcess),
+					len(repositoriesToProcess),
 				),
+			)
+			maxRepoThreads = len(repositoriesToProcess)
+		}
+		// create our batch to process from the first X elements
+		batch := repositoriesToProcess[:maxRepoThreads]
+		Debug(fmt.Sprintf("Repositories in this batch: %d", len(batch)))
+		// cut those elements off of the original array
+		repositoriesToProcess = repositoriesToProcess[len(batch):]
+		Debug(fmt.Sprintf("Repositories left: %d", len(repositoriesToProcess)))
+		// set up our waitgroup
+		Debug(
+			fmt.Sprintf(
+				"Creating %d repository reader threads...",
+				len(batch),
 			),
 		)
-
-		// validate we have API attempts left
-		timeoutErr := ValidateApiRate(restClient, "core")
-		if timeoutErr != nil {
-			OutputError(timeoutErr.Error(), true)
+		waitGroup.Add(len(batch))
+		// do for the number of threads
+		for i := 0; i < len(batch); i++ {
+			Debug(
+				fmt.Sprintf(
+					"Launching webhooks lookup go routine (%d of %d) for repository '%s'",
+					i+1,
+					len(batch),
+					batch[i].NameWithOwner,
+				),
+			)
+			go LookupWebhooks(batch[i])
 		}
-
-		// query for the webhooks on this repository
-		err = restClient.Get(fmt.Sprint("repos/", repo.NameWithOwner, "/hooks"), &webhooksResponse)
-		if err != nil {
-			OutputError(err.Error(), true)
-		}
-
-		// add the webhooks to the table data for visibility
-		for i, webhook := range webhooksResponse {
-			// add the repo name the webhook
-			webhook.Repository = repo.Name
-
-			// set variables for looking up secrets
-			webhookLookupSecret := true
-			webhookSecretPath := repo.Name
-
-			// set display variables
-			webhookName := repo.Name
-			webhookId := strconv.Itoa(webhook.ID)
-			webhookUrl := webhook.Config.URL
-			webhookSecretFound := "Yes"
-
-			// try to parse the webhook path from the URL the vault-path-key flag is provided
-			if vaultPathKey != "" {
-
-				// make sure URL contains the path key and split the URL by ?
-				webhookUrlPieces := strings.Split(webhook.Config.URL, "?")
-				if strings.Contains(webhook.Config.URL, vaultPathKey) && len(webhookUrlPieces) == 2 {
-
-					// split the URL parameters by &
-					webhookParameters := strings.Split(webhookUrlPieces[1], "&")
-					// loop pieces and find the value from the path key
-					for _, piece := range webhookParameters {
-						if strings.HasPrefix(piece, vaultPathKey) {
-							webhookSecretPath = strings.Replace(piece, fmt.Sprint(vaultPathKey, "="), "", 1)
-							break
-						}
-					}
-
-				} else {
-					missingSecrets++
-					webhookSecretFound = "No parameters found in Webhook URL"
-					webhookLookupSecret = false
-				}
-			}
-
-			// only lookup when the previous step hasn't failed
-			if webhookLookupSecret {
-				// try to get the webhook secret value from Vault
-				sp.Suffix = fmt.Sprint(
-					" ",
-					Debug(
-						fmt.Sprintf(
-							"Getting secret for webhook ID %s in repository %s",
-							strconv.Itoa(webhook.ID),
-							webhook.Repository,
-						),
-					),
-				)
-				foundSecret, connErr, keyErr := GetVaultSecret(webhookSecretPath)
-				if connErr != nil {
-					sp.Stop()
-					OutputError(connErr.Error(), true)
-				} else if keyErr != nil {
-					missingSecrets++
-					webhookSecretFound = keyErr.Error()
-				}
-				webhook.Config.Secret = foundSecret
-			}
-
-			Debug(fmt.Sprint("Secret look-up results: ", webhookSecretFound))
-
-			// modify output when a secret is not found
-			if webhook.Config.Secret == "" {
-				webhookName = red(webhookName)
-				webhookId = red(webhookId)
-				webhookUrl = red(webhookUrl)
-				webhookSecretPath = red(webhookSecretPath)
-				webhookSecretFound = red(webhookSecretFound)
-			}
-
-			// overwrite the webhook at the index in the array
-			webhooksResponse[i] = webhook
-
-			// add to table data
-			td = append(td, []string{
-				webhookName,
-				webhookId,
-				webhookUrl,
-				webhookSecretPath,
-				webhookSecretFound,
-			})
-		}
-
-		// append to the list of webooks
-		webhooks = append(webhooks, webhooksResponse...)
+		// wait for threads to finish
+		waitGroup.Wait()
+		batchNum++
 	}
 
 	// stop the spinner animation
@@ -744,9 +804,10 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// show the results
 	OutputNotice("Webhooks Found: ")
+	Debug(fmt.Sprint(webhooks))
 	LF()
 	// output table
-	pterm.DefaultTable.WithHasHeader().WithHeaderRowSeparator("-").WithData(td).Render()
+	pterm.DefaultTable.WithHasHeader().WithHeaderRowSeparator("-").WithData(webhookResultsTable).Render()
 	LF()
 
 	// confirm the executor wants to proceed
@@ -786,7 +847,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		}
 
 		// validate we have API attempts left
-		timeoutErr := ValidateApiRate(restClient, "core")
+		timeoutErr := ValidateApiRate("core")
 		if timeoutErr != nil {
 			OutputError(timeoutErr.Error(), true)
 		}
