@@ -65,7 +65,7 @@ var (
 		Use:           "gh migrate-webhook-secrets",
 		Short:         "GitHub CLI extension to migrate webhook secrets",
 		Long:          `GitHub CLI extension to migrate webhook secrets. Supports HashiCorp Vault (KV V1 & V2) as the secret storage intermediary.`,
-		Version:       "0.1.8",
+		Version:       "0.2.0",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          CloneWebhooks,
