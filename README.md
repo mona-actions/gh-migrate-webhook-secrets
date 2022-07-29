@@ -48,6 +48,7 @@ Flags:
       --ignore-errors             Proceed regardless of errors
       --no-cache                  Disable cache for GitHub API requests
       --org string                Organization name
+      --threads int               Number of threads to process at a time. WARNING: could have negative effects on your API rate limit. (default 5)
       --token string              Optional token for authentication (uses GitHub CLI built-in authentication)
       --vault-kvv1                Use Vault KVv1 instead of KVv2
       --vault-mountpoint string   The mount point of the secrets on the Vault server (default "secret")
@@ -59,6 +60,3 @@ Flags:
 ## Notes
 - Does **NOT** copy enterprise or organizational webhooks.
 - Does **NOT** support copying secrets directly from GitHub (must use third-party secret storage like HashiCorp Vault)
-
-## To Do
-- [ ] Update flags to better match other tooling (gh-migrate-deploy-hooks)
