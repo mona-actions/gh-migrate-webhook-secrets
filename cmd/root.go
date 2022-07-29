@@ -49,12 +49,8 @@ var (
 	patchSucceeded      int = 0
 
 	// Create some colors and a spinner
-	hiBlack = color.New(color.FgHiBlack).SprintFunc()
-	reset   = color.New(color.Reset).SprintFunc()
-	red     = color.New(color.FgRed).SprintFunc()
-	green   = color.New(color.FgGreen).SprintFunc()
-	cyan    = color.New(color.FgCyan).SprintFunc()
-	sp      = spinner.New(spinner.CharSets[2], 100*time.Millisecond)
+	red = color.New(color.FgRed).SprintFunc()
+	sp  = spinner.New(spinner.CharSets[2], 100*time.Millisecond)
 
 	// set up clients
 	restClient    api.RESTClient
@@ -204,8 +200,6 @@ func Output(message string, color string, isErr bool, exit bool) {
 	switch {
 	case color == "red":
 		message = red(message)
-	case color == "cyan":
-		message = cyan(message)
 	}
 	fmt.Println(message)
 	if exit {
