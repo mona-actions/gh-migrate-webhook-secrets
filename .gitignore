@@ -1,3 +1,5 @@
 /gh-migrate-webhook-secrets
 /gh-migrate-webhook-secrets.exe
 /*.log
+.DS_Store
+thumbs.DB
