@@ -45,6 +45,8 @@ var (
 	webhookResultsTable pterm.TableData
 	waitGroup           sync.WaitGroup
 	missingSecrets      int = 0
+	patchFailed         int = 0
+	patchSucceeded      int = 0
 
 	// Create some colors and a spinner
 	hiBlack = color.New(color.FgHiBlack).SprintFunc()
@@ -52,7 +54,7 @@ var (
 	red     = color.New(color.FgRed).SprintFunc()
 	green   = color.New(color.FgGreen).SprintFunc()
 	cyan    = color.New(color.FgCyan).SprintFunc()
-	sp      = spinner.New(spinner.CharSets[2], 40*time.Millisecond)
+	sp      = spinner.New(spinner.CharSets[2], 100*time.Millisecond)
 
 	// set up clients
 	restClient    api.RESTClient
@@ -154,7 +156,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&hostname, "hostname", "github.com", "GitHub hostname")
 	rootCmd.PersistentFlags().StringVar(&organization, "org", "", "Organization name")
 	rootCmd.PersistentFlags().StringVar(&token, "token", "", "Optional token for authentication (uses GitHub CLI built-in authentication)")
-	rootCmd.PersistentFlags().IntVar(&maxThreads, "threads", 10, "Number of threads to process at a time. WARNING: could have negative effects on your API rate limit.")
+	rootCmd.PersistentFlags().IntVar(&maxThreads, "threads", 5, "Number of threads to process at a time.")
 
 	// vault flags
 	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "secret", "The mount point of the secrets on the Vault server")
@@ -614,6 +616,96 @@ func LookupWebhooks(repository Repository) {
 	waitGroup.Done()
 }
 
+func PatchWebhooks(webhook Webhook) {
+
+	// skip bad webhooks
+	if webhook.Config.Secret == "" {
+		patchFailed++
+		Debug(
+			fmt.Sprintf(
+				"Skipping webhook ID %d because no secret value was found.",
+				webhook.ID,
+			),
+		)
+		waitGroup.Done()
+		return
+	}
+
+	// validate we have API attempts left
+	timeoutErr := ValidateApiRate("core")
+	if timeoutErr != nil {
+		OutputError(timeoutErr.Error(), true)
+	}
+
+	// output what's current processing
+	Debug(
+		fmt.Sprintf(
+			"Patching webhook ID %d...",
+			webhook.ID,
+		),
+	)
+
+	// set up the encoding reader from the current webhook
+	var webhookToUpdate = WebHookPatch{
+		URL:          webhook.Config.URL,
+		Content_Type: webhook.Config.Content_Type,
+		Insecure_SSL: webhook.Config.Insecure_SSL,
+		Secret:       webhook.Config.Secret,
+	}
+
+	// convert the struct to io.reader
+	data, err := json.Marshal(&webhookToUpdate)
+	if err != nil {
+		sp.Stop()
+		OutputError(err.Error(), true)
+	}
+	reader := bytes.NewReader(data)
+
+	// post the request
+	webhookResponse := Webhook{}
+	err = restClient.Patch(
+		fmt.Sprintf(
+			"repos/%s/%s/hooks/%d/config",
+			organization,
+			webhook.Repository,
+			webhook.ID,
+		),
+		reader,
+		&webhookResponse,
+	)
+
+	// validate the request worked.
+	if err != nil {
+
+		patchFailed++
+
+		// log the error
+		Debug(
+			fmt.Sprintf(
+				"[ERROR] Webhook ID %d: Patch failed - %s",
+				webhook.ID,
+				err.Error(),
+			),
+		)
+
+	} else {
+		// update success count.
+		Debug(
+			fmt.Sprintf(
+				"Webhook ID %d : Successfully patched.",
+				webhook.ID,
+			),
+		)
+		patchSucceeded++
+	}
+
+	// need to sleep after writes to avoid hitting the secondary rate limit
+	time.Sleep(1 * time.Second)
+
+	// close out this thread
+	waitGroup.Done()
+}
+
 // GetUses returns GitHub Actions used in workflows
 func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
@@ -626,7 +718,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	LogLF()
 	Debug("---- VALIDATING FLAGS & ENV VARS ----")
-	LogLF()
 
 	// validate flags provided
 	r, _ := regexp.Compile("^http(s|):(//|)")
@@ -702,6 +793,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	if vaultPathKey != "" {
 		OutputNotice(fmt.Sprint("Vault Path Key: ", vaultPathKey))
 	}
+	OutputNotice(fmt.Sprintf("Log File: %s", logFile.Name()))
 
 	// test vault connection
 	vaultClient, err := GetVaultClient()
@@ -729,7 +821,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	LogLF()
 	Debug("---- LISTING REPOSITORIES ----")
-	LogLF()
 
 	// Loop through pages of repositories, waiting 1 second in between
 	var i = 1
@@ -768,7 +859,6 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	LogLF()
 	Debug("---- GETTING ALL WEBHOOKS ----")
-	LogLF()
 
 	// set up table header for displaying of data
 	Debug("Creating table data for display...")
@@ -875,123 +965,86 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	sp.Restart()
 	Debug("---- PATCHING WEBHOOKS ----")
 
-	// loop through all webhooks
-	var success = 0
-	var failed = 0
-	for _, webhook := range webhooks {
+	// set some vars that can be adjusted in looping
+	webhooksToProcess := webhooks
+	maxWebhookThreads := maxThreads
 
-		// skip bad webhooks
-		if webhook.Config.Secret == "" {
-			failed++
+	// do this while there are elements left
+	Debug("Batching webhook patching...")
+	batchNum = 1
+	for len(webhooksToProcess) > 0 {
+		// adjust number of threads
+		if len(webhooksToProcess) < maxWebhookThreads {
 			Debug(
 				fmt.Sprintf(
-					"Skipping webhook ID %d because no secret value was found.",
-					webhook.ID,
+					"Setting number of threads to %d because there are only %d items left to process.",
+					len(webhooksToProcess),
+					len(webhooksToProcess),
 				),
 			)
-			continue
+			maxWebhookThreads = len(webhooksToProcess)
 		}
-
-		// validate we have API attempts left
-		timeoutErr := ValidateApiRate("core")
-		if timeoutErr != nil {
-			OutputError(timeoutErr.Error(), true)
-		}
-
-		// output what's current processing
+		DebugAndStatus(
+			fmt.Sprintf(
+				"Running webhook patching batch #%d (%d threads)...",
+				batchNum,
+				maxWebhookThreads,
+			),
+		)
+		// create our batch to process from the first X elements
+		batch := webhooksToProcess[:maxWebhookThreads]
+		Debug(fmt.Sprintf("Webhooks in this batch: %d", len(batch)))
+		// cut those elements off of the original array
+		webhooksToProcess = webhooksToProcess[len(batch):]
+		Debug(fmt.Sprintf("Webhooks left: %d", len(webhooksToProcess)))
+		// set up our waitgroup
 		Debug(
 			fmt.Sprintf(
-				"Patching webhook ID %d...",
-				webhook.ID,
+				"Creating %d webhook patching threads...",
+				len(batch),
 			),
 		)
-
-		// set up the encoding reader from the current webhook
-		var webhookToUpdate = WebHookPatch{
-			URL:          webhook.Config.URL,
-			Content_Type: webhook.Config.Content_Type,
-			Insecure_SSL: webhook.Config.Insecure_SSL,
-			Secret:       webhook.Config.Secret,
+		waitGroup.Add(len(batch))
+		// do for the number of threads
+		for i := 0; i < len(batch); i++ {
+			Debug(
+				fmt.Sprintf(
+					"Running thread %d of %d for webhook patching ID %d",
+					i+1,
+					len(batch),
+					batch[i].ID,
+				),
+			)
+			go PatchWebhooks(batch[i])
 		}
-
-		// convert the struct to io.reader
-		data, err := json.Marshal(&webhookToUpdate)
-		if err != nil {
-			sp.Stop()
-			OutputError(err.Error(), true)
-		}
-		reader := bytes.NewReader(data)
-
-		// post the request
-		webhookResponse := Webhook{}
-		err = restClient.Patch(
-			fmt.Sprint(
-				"repos/",
-				organization,
-				"/",
-				webhook.Repository,
-				"/hooks/",
-				webhook.ID,
-				"/config",
-			),
-			reader,
-			&webhookResponse,
-		)
-
-		// validate the request worked.
-		if err != nil {
-
-			failed++
-
-			// stop and output the error
-			sp.Stop()
-			OutputError(err.Error(), false)
-			LF()
-
-			// if autoproceed is not enabled, prompt user
-			if !ignoreErrors {
-				c, err := AskForConfirmation("Do you want to proceed?")
-				LF()
-				if err != nil {
-					OutputError(err.Error(), true)
-				}
-				if !c {
-					LF()
-					OutputError("Process exited.", true)
-				}
-			}
-
-			// restart the spinner
-			sp.Start()
-		} else {
-			// update success count.
-			Debug(fmt.Sprintf("Successfully updated secret ID %d", webhook.ID))
-			success++
-		}
-
-		// need to sleep after writes to avoid hitting the secondary rate limit
-		time.Sleep(1 * time.Second)
+		// wait for threads to finish
+		waitGroup.Wait()
+		batchNum++
 	}
+
 	sp.Stop()
 
-	if failed > 0 {
+	LogLF()
+	Debug("---- RESULTS ----")
+
+	if patchFailed > 0 {
 		OutputError(
 			fmt.Sprintf(
-				"Failed to migrate secrets for %d webhook(s)",
-				failed,
+				"Failed to migrate secrets for %d webhook(s).",
+				patchFailed,
 			),
 			false,
 		)
 	}
-
-	if success > 0 {
+	if patchSucceeded > 0 {
 		OutputNotice(
 			fmt.Sprintf(
 				"Successfully migrated secrets for %d webhook(s).",
-				success,
+				patchSucceeded,
 			),
 		)
 	}
 
+	// always return
 	return err
 }
