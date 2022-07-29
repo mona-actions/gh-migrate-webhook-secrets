@@ -52,7 +52,7 @@ var (
 	red     = color.New(color.FgRed).SprintFunc()
 	green   = color.New(color.FgGreen).SprintFunc()
 	cyan    = color.New(color.FgCyan).SprintFunc()
-	sp      = spinner.New(spinner.CharSets[14], 40*time.Millisecond)
+	sp      = spinner.New(spinner.CharSets[2], 40*time.Millisecond)
 
 	// set up clients
 	restClient    api.RESTClient
@@ -154,7 +154,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&hostname, "hostname", "github.com", "GitHub hostname")
 	rootCmd.PersistentFlags().StringVar(&organization, "org", "", "Organization name")
 	rootCmd.PersistentFlags().StringVar(&token, "token", "", "Optional token for authentication (uses GitHub CLI built-in authentication)")
-	rootCmd.PersistentFlags().IntVar(&maxThreads, "threads", 10, "Number of threads to process at a time. WARNING: could have detrimental effects on your API rate limit.")
+	rootCmd.PersistentFlags().IntVar(&maxThreads, "threads", 10, "Number of threads to process at a time. WARNING: could have negative effects on your API rate limit.")
 
 	// vault flags
 	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "secret", "The mount point of the secrets on the Vault server")
