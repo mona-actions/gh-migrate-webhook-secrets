@@ -238,6 +238,7 @@ func AskForConfirmation(s string) (res bool, err error) {
 	for {
 		fmt.Printf("%s [y/n]: ", s)
 		response, err := reader.ReadString('\n')
+		Debug(fmt.Sprint("User responded with: ", response))
 		if err != nil {
 			return false, err
 		}
@@ -279,11 +280,13 @@ func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 		// get the current rate liit left or error out if request fails
 		err = client.Get("rate_limit", &apiResponse)
 		if err != nil {
+			Debug("Failed to get rate limit from GitHub server.")
 			return err
 		}
 
 		// if rate limiting is disabled, do not proceed
 		if apiResponse.Message == "Rate limiting is not enabled." {
+			Debug("Rate limit is not enabled.")
 			return err
 		}
 		// choose which response to validate
