@@ -29,7 +29,6 @@ var (
 	// Set up main variables
 	noCache             = false
 	confirm             = false
-	ignoreErrors        = false
 	hostname            string
 	organization        string
 	token               string
@@ -39,7 +38,8 @@ var (
 	vaultToken          string
 	vaultKvv1           = false
 	logFile             *os.File
-	maxThreads          int
+	maxReadThreads      int
+	maxWriteThreads     int
 	repositories        []Repository = []Repository{}
 	webhooks            []Webhook    = []Webhook{}
 	webhookResultsTable pterm.TableData
@@ -61,7 +61,7 @@ var (
 		Use:           "gh migrate-webhook-secrets",
 		Short:         "GitHub CLI extension to migrate webhook secrets",
 		Long:          `GitHub CLI extension to migrate webhook secrets. Supports HashiCorp Vault (KV V1 & V2) as the secret storage intermediary.`,
-		Version:       "0.2.0",
+		Version:       "0.2.1",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          CloneWebhooks,
@@ -78,14 +78,12 @@ var (
 type User struct {
 	Login string
 }
-
 type RateResponse struct {
 	Limit     int
 	Remaining int
 	Reset     int
 	Used      int
 }
-
 type ApiResponse struct {
 	Resources struct {
 		Core    RateResponse
@@ -94,11 +92,9 @@ type ApiResponse struct {
 	Message string
 	Rate    RateResponse
 }
-
 type Organization struct {
 	Login string
 }
-
 type Repos struct {
 	PageInfo struct {
 		HasNextPage bool
@@ -106,7 +102,6 @@ type Repos struct {
 	}
 	Nodes []Repository
 }
-
 type Repository struct {
 	Name          string
 	NameWithOwner string
@@ -114,7 +109,6 @@ type Repository struct {
 	Description   string
 	URL           string
 }
-
 type WebHookConfig struct {
 	URL          string
 	Content_Type string
@@ -123,7 +117,6 @@ type WebHookConfig struct {
 	Token        string
 	Digest       string
 }
-
 type Webhook struct {
 	ID         int
 	Repository string
@@ -132,48 +125,98 @@ type Webhook struct {
 	Events     []string
 	Active     bool
 }
-
 type WebHookPatch struct {
 	URL          string `json:"url"`
 	Content_Type string `json:"content_type"`
 	Insecure_SSL string `json:"insecure_ssl"`
 	Secret       string `json:"secret"`
 }
-
 type VaultAppRoleLogin struct {
 	RoleID   string `json:"role_id"`
 	SecretID string `json:"secret_id"`
 }
 
-// Initialization function. Only happens once regardless of import.
 func init() {
 
 	// base flags
-	rootCmd.PersistentFlags().StringVar(&hostname, "hostname", "github.com", "GitHub hostname")
-	rootCmd.PersistentFlags().StringVar(&organization, "org", "", "Organization name")
-	rootCmd.PersistentFlags().StringVar(&token, "token", "", "Optional token for authentication (uses GitHub CLI built-in authentication)")
-	rootCmd.PersistentFlags().IntVar(&maxThreads, "threads", 5, "Number of threads to process at a time.")
+	rootCmd.PersistentFlags().StringVar(
+		&hostname,
+		"hostname",
+		"github.com",
+		"GitHub hostname",
+	)
+	rootCmd.PersistentFlags().StringVar(
+		&organization,
+		"org",
+		"",
+		"Organization name",
+	)
+	rootCmd.PersistentFlags().StringVar(
+		&token,
+		"token",
+		"",
+		"Optional token for authentication (uses GitHub CLI built-in authentication)",
+	)
+	rootCmd.PersistentFlags().IntVar(
+		&maxReadThreads,
+		"read-threads",
+		5,
+		"Number of threads to process at a time.",
+	)
+	rootCmd.PersistentFlags().IntVar(
+		&maxWriteThreads,
+		"write-threads",
+		1,
+		"Number of write threads to process at a time. (WARNING: increasing beyond 1 can trigger the secondary rate limit.)",
+	)
 
 	// vault flags
-	rootCmd.PersistentFlags().StringVar(&vaultMountpoint, "vault-mountpoint", "secret", "The mount point of the secrets on the Vault server")
-	rootCmd.PersistentFlags().StringVar(&vaultPathKey, "vault-path-key", "", "The key in the webhook URL (ex: <webhook-server>?secret=<vault-path-key>) to use for finding the corresponding secret")
-	rootCmd.PersistentFlags().StringVar(&vaultValueKey, "vault-value-key", "value", "The key in the Vault secret corresponding to the webhook secret value")
-	rootCmd.PersistentFlags().BoolVar(&vaultKvv1, "vault-kvv1", false, "Use Vault KVv1 instead of KVv2")
+	rootCmd.PersistentFlags().StringVar(
+		&vaultMountpoint,
+		"vault-mountpoint",
+		"secret",
+		"The mount point of the secrets on the Vault server",
+	)
+	rootCmd.PersistentFlags().StringVar(
+		&vaultPathKey,
+		"vault-path-key",
+		"",
+		"The key in the webhook URL (ex: <webhook-server>?secret=<vault-path-key>) to use for finding the corresponding secret",
+	)
+	rootCmd.PersistentFlags().StringVar(
+		&vaultValueKey,
+		"vault-value-key",
+		"value",
+		"The key in the Vault secret corresponding to the webhook secret value",
+	)
+	rootCmd.PersistentFlags().BoolVar(
+		&vaultKvv1,
+		"vault-kvv1",
+		false,
+		"Use Vault KVv1 instead of KVv2",
+	)
 
 	// boolean switches
-	rootCmd.PersistentFlags().BoolVar(&noCache, "no-cache", false, "Disable cache for GitHub API requests")
-	rootCmd.PersistentFlags().BoolVar(&confirm, "confirm", false, "Auto respond to confirmation prompt")
-	rootCmd.PersistentFlags().BoolVar(&ignoreErrors, "ignore-errors", false, "Proceed regardless of errors")
+	rootCmd.PersistentFlags().BoolVar(
+		&noCache,
+		"no-cache",
+		false,
+		"Disable cache for GitHub API requests",
+	)
+	rootCmd.PersistentFlags().BoolVar(
+		&confirm,
+		"confirm",
+		false,
+		"Auto respond to confirmation prompt",
+	)
 }
 
-// Main function, calls Cobra
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		ExitOnError(err)
 	}
 }
 
-// Shared method for exiting on error.
 func ExitOnError(err error) {
 	if err != nil {
 		rootCmd.PrintErrln(red(err.Error()))
@@ -267,7 +310,6 @@ func AskForConfirmation(s string) (res bool, err error) {
 	}
 }
 
-// sets up the API clients for GH
 func GetOpts(hostname string) (options api.ClientOptions) {
 	// set options
 	opts := api.ClientOptions{
@@ -289,7 +331,12 @@ func ValidateApiRate(requestType string) (err error) {
 
 		// after 240 attempts (1 hour), end the scrip.
 		if attempts >= 240 {
-			return errors.New("After an hour of retrying, the API rate limit has not refreshed. Aborting.")
+			return errors.New(
+				fmt.Sprint(
+					"After an hour of retrying, the API rate limit has not ",
+					"refreshed. Aborting.",
+				),
+			)
 		}
 
 		// get the current rate liit left or error out if request fails
@@ -308,7 +355,12 @@ func ValidateApiRate(requestType string) (err error) {
 		rateRemaining := 0
 		switch {
 		default:
-			return errors.New(fmt.Sprint("Invalid API request type provided: '", requestType, "'"))
+			return errors.New(
+				fmt.Sprintf(
+					"Invalid API request type provided: '%s'",
+					requestType,
+				),
+			)
 		case requestType == "core":
 			rateRemaining = apiResponse.Resources.Core.Remaining
 		case requestType == "graphql":
@@ -319,9 +371,11 @@ func ValidateApiRate(requestType string) (err error) {
 			attempts++
 			DebugAndStatus(
 				fmt.Sprintf(
-					"API rate limit (%s) has none remaining. Sleeping for 15 seconds (attempt #%d)",
-					requestType,
-					attempts,
+					fmt.Sprintf(
+						"API rate limit (%s) has none remaining. Sleeping for 15 seconds (attempt #%d)",
+						requestType,
+						attempts,
+					),
 				),
 			)
 			time.Sleep(15 * time.Second)
@@ -332,7 +386,6 @@ func ValidateApiRate(requestType string) (err error) {
 	return err
 }
 
-// Gets an auth token from VAULT_ROLE_ID and VAULT_SECRET_ID
 func AuthUser(vaultClient *vault.Client, roleId string, secretId string) (string, error) {
 	// step: create the token request
 	request := vaultClient.NewRequest("POST", "/v1/auth/approle/login")
@@ -413,10 +466,10 @@ func GetVaultClient() (client *vault.Client, err error) {
 	return client, err
 }
 
-// Looks up secrets in HashiCorp Vault
 func GetVaultSecret(key string) (secret string, connErr error, pathErr error) {
 
-	// Get the Vault client. If no vault client and no errors were returned, skip this step
+	// Get the Vault client. If no vault client and no errors were returned,
+	// skip this step
 	vaultClient, connErr := GetVaultClient()
 	if vaultClient == nil && connErr == nil {
 		return "", connErr, pathErr
@@ -458,7 +511,12 @@ func GetVaultSecret(key string) (secret string, connErr error, pathErr error) {
 	if foundKey {
 		secretValue = secretInterface.(string)
 	} else {
-		pathErr = errors.New(fmt.Sprint("Key '", vaultValueKey, "' not found in secret."))
+		pathErr = errors.New(
+			fmt.Sprintf(
+				"Key '%s' not found in secret.",
+				vaultValueKey,
+			),
+		)
 	}
 	return secretValue, connErr, pathErr
 }
@@ -483,13 +541,24 @@ func LookupWebhooks(repository Repository) {
 	}
 
 	// query for the webhooks on this repository
-	err := restClient.Get(fmt.Sprint("repos/", repository.NameWithOwner, "/hooks"), &webhooksResponse)
+	err := restClient.Get(
+		fmt.Sprintf(
+			"repos/%s/hooks",
+			repository.NameWithOwner,
+		),
+		&webhooksResponse,
+	)
 	if err != nil {
 		OutputError(err.Error(), true)
 	}
 
 	if len(webhooksResponse) == 0 {
-		Debug(fmt.Sprintf("No webhooks found for repository '%s'.", repository.Name))
+		Debug(
+			fmt.Sprintf(
+				"No webhooks found for repository '%s'.",
+				repository.Name,
+			),
+		)
 	}
 
 	// add the webhooks to the table data for visibility
@@ -700,7 +769,6 @@ func PatchWebhooks(webhook Webhook) {
 	waitGroup.Done()
 }
 
-// GetUses returns GitHub Actions used in workflows
 func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// Create log file
@@ -788,6 +856,8 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		OutputNotice(fmt.Sprint("Vault Path Key: ", vaultPathKey))
 	}
 	OutputNotice(fmt.Sprintf("Log File: %s", logFile.Name()))
+	OutputNotice(fmt.Sprintf("Read Threads: %d", maxReadThreads))
+	OutputNotice(fmt.Sprintf("Write Threads: %d", maxWriteThreads))
 
 	// test vault connection
 	vaultClient, err := GetVaultClient()
@@ -868,7 +938,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// set some vars that can be adjusted in looping
 	repositoriesToProcess := repositories
-	maxRepoThreads := maxThreads
+	maxRepoThreads := maxReadThreads
 
 	// do this while there are elements left
 	Debug("Batching repository webhook reads...")
@@ -961,7 +1031,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// set some vars that can be adjusted in looping
 	webhooksToProcess := webhooks
-	maxWebhookThreads := maxThreads
+	maxWebhookThreads := maxWriteThreads
 
 	// do this while there are elements left
 	Debug("Batching webhook patching...")
