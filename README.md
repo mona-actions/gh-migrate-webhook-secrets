@@ -45,16 +45,16 @@ Flags:
       --confirm                   Auto respond to confirmation prompt
   -h, --help                      help for gh
       --hostname string           GitHub hostname (default "github.com")
-      --ignore-errors             Proceed regardless of errors
       --no-cache                  Disable cache for GitHub API requests
       --org string                Organization name
-      --threads int               Number of threads to process at a time. WARNING: could have negative effects on your API rate limit. (default 5)
+      --read-threads int          Number of threads to process at a time. (default 5)
       --token string              Optional token for authentication (uses GitHub CLI built-in authentication)
       --vault-kvv1                Use Vault KVv1 instead of KVv2
       --vault-mountpoint string   The mount point of the secrets on the Vault server (default "secret")
       --vault-path-key string     The key in the webhook URL (ex: <webhook-server>?secret=<vault-path-key>) to use for finding the corresponding secret
       --vault-value-key string    The key in the Vault secret corresponding to the webhook secret value (default "value")
   -v, --version                   version for gh
+      --write-threads int         Number of write threads to process at a time. (WARNING: increasing beyond 1 can trigger the secondary rate limit.) (default 1)
 ```
 
 ## Notes
