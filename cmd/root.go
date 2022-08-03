@@ -34,7 +34,7 @@ var (
 	token               string
 	vaultMountpoint     string
 	vaultValueKey       string
-	vaultPathKey        string
+	vaultPathKeys       []string
 	vaultToken          string
 	vaultKvv1           = false
 	logFile             *os.File
@@ -177,10 +177,10 @@ func init() {
 		"secret",
 		"The mount point of the secrets on the Vault server",
 	)
-	rootCmd.PersistentFlags().StringVar(
-		&vaultPathKey,
-		"vault-path-key",
-		"",
+	rootCmd.PersistentFlags().StringSliceVar(
+		&vaultPathKeys,
+		"vault-path-keys",
+		[]string{},
 		"The key in the webhook URL (ex: <webhook-server>?secret=<vault-path-key>) to use for finding the corresponding secret",
 	)
 	rootCmd.PersistentFlags().StringVar(
@@ -577,35 +577,40 @@ func LookupWebhooks(repository Repository) {
 		webhookSecretFound := "Yes"
 
 		// try to parse the webhook path from the URL the vault-path-key flag is provided
-		if vaultPathKey != "" {
+		if len(vaultPathKeys) > 0 {
+			var webhookSecretPaths []string
 
-			// make sure URL contains the path key and split the URL by ?
-			webhookUrlPieces := strings.Split(webhook.Config.URL, "?")
-			if strings.Contains(webhook.Config.URL, vaultPathKey) && len(webhookUrlPieces) == 2 {
+			for _, vaultPathKey := range vaultPathKeys {
+				// make sure URL contains the path key and split the URL by ?
+				webhookUrlPieces := strings.Split(webhook.Config.URL, "?")
+				if strings.Contains(webhook.Config.URL, vaultPathKey) && len(webhookUrlPieces) == 2 {
 
-				// split the URL parameters by &
-				webhookParameters := strings.Split(webhookUrlPieces[1], "&")
-				// loop pieces and find the value from the path key
-				for _, piece := range webhookParameters {
-					if strings.HasPrefix(piece, vaultPathKey) {
-						webhookSecretPath = strings.Replace(piece, fmt.Sprint(vaultPathKey, "="), "", 1)
-						break
+					// split the URL parameters by &
+					webhookParameters := strings.Split(webhookUrlPieces[1], "&")
+					// loop pieces and find the value from the path key
+					for _, piece := range webhookParameters {
+						if strings.HasPrefix(piece, vaultPathKey) {
+							webhookSecretPaths = append(webhookSecretPaths, strings.Replace(piece, fmt.Sprint(vaultPathKey, "="), "", 1))
+							// webhookSecretPathEntry = strings.Replace(piece, fmt.Sprint(vaultPathKey, "="), "", 1)
+							break
+						}
 					}
-				}
 
-			} else {
-				missingSecrets++
-				webhookSecretFound = "No parameters found in Webhook URL"
-				webhookLookupSecret = false
-				Debug(
-					fmt.Sprintf(
-						"Webhook ID %d: Vault path key provided (%s), but no matching key-value was found in webhook URL (%s)",
-						webhook.ID,
-						vaultPathKey,
-						webhookUrl,
-					),
-				)
+				} else {
+					missingSecrets++
+					webhookSecretFound = "No parameters found in Webhook URL"
+					webhookLookupSecret = false
+					Debug(
+						fmt.Sprintf(
+							"Webhook ID %d: Vault path key provided (%s), but no matching key-value was found in webhook URL (%s)",
+							webhook.ID,
+							vaultPathKey,
+							webhookUrl,
+						),
+					)
+				}
 			}
+			webhookSecretPath = strings.Join(webhookSecretPaths[:], "/")
 		}
 
 		// only lookup when the previous step hasn't failed
@@ -852,8 +857,8 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	if vaultMountpoint != "" {
 		OutputNotice(fmt.Sprint("Vault Mount Point: ", vaultMountpoint))
 	}
-	if vaultPathKey != "" {
-		OutputNotice(fmt.Sprint("Vault Path Key: ", vaultPathKey))
+	if len(vaultPathKeys) > 0 {
+		OutputNotice(fmt.Sprint("Vault Path Key: ", vaultPathKeys))
 	}
 	OutputNotice(fmt.Sprintf("Log File: %s", logFile.Name()))
 	OutputNotice(fmt.Sprintf("Read Threads: %d", maxReadThreads))
