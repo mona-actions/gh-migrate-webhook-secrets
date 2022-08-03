@@ -34,7 +34,7 @@ var (
 	token               string
 	vaultMountpoint     string
 	vaultValueKey       string
-	vaultPathKeys		[]string
+	vaultPathKeys       []string
 	vaultToken          string
 	vaultKvv1           = false
 	logFile             *os.File
@@ -577,7 +577,7 @@ func LookupWebhooks(repository Repository) {
 		webhookSecretFound := "Yes"
 
 		// try to parse the webhook path from the URL the vault-path-key flag is provided
-		if len(vaultPathKeys) > 0  {
+		if len(vaultPathKeys) > 0 {
 			var webhookSecretPaths []string
 
 			for _, vaultPathKey := range vaultPathKeys {
@@ -857,7 +857,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	if vaultMountpoint != "" {
 		OutputNotice(fmt.Sprint("Vault Mount Point: ", vaultMountpoint))
 	}
-	if len(vaultPathKeys) > 0  {
+	if len(vaultPathKeys) > 0 {
 		OutputNotice(fmt.Sprint("Vault Path Key: ", vaultPathKeys))
 	}
 	OutputNotice(fmt.Sprintf("Log File: %s", logFile.Name()))
