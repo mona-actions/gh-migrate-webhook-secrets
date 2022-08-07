@@ -38,6 +38,7 @@ var (
 	vaultToken          string
 	vaultKvv1           = false
 	logFile             *os.File
+	outputFile          *os.File
 	maxReadThreads      int
 	maxWriteThreads     int
 	repositories        []Repository = []Repository{}
@@ -277,6 +278,25 @@ func Log(message string) {
 	)
 	if err != nil {
 		fmt.Println(red("Unable to write to log file."))
+		fmt.Println(red(err))
+		os.Exit(1)
+	}
+}
+
+/** 
+ * Write the migration output to a text file so it can be migrated in chunk
+ */
+func Write2Output(message string) {
+	if message != "" {
+		message = fmt.Sprint(
+			message,
+		)
+	}
+	_, err := outputFile.WriteString(
+		fmt.Sprintln(message),
+	)
+	if err != nil {
+		fmt.Println(red("Unable to write to output file."))
 		fmt.Println(red(err))
 		os.Exit(1)
 	}
@@ -574,6 +594,10 @@ func LookupWebhooks(repository Repository) {
 		webhookName := repository.Name
 		webhookId := strconv.Itoa(webhook.ID)
 		webhookUrl := webhook.Config.URL
+		webhookContentType := webhook.Config.Content_Type
+		webhookSSL := webhook.Config.Insecure_SSL
+		webHookActive := webhook.Active
+		webhookEvents := webhook.Events
 		webhookSecretFound := "Yes"
 
 		// try to parse the webhook path from the URL the vault-path-key flag is provided
@@ -624,6 +648,20 @@ func LookupWebhooks(repository Repository) {
 			)
 			// try to get the webhook secret value from Vault
 			foundSecret, connErr, keyErr := GetVaultSecret(webhookSecretPath)
+
+			Write2Output(
+				fmt.Sprintf(
+					"%s,%s,%s,%t,%s,%s,%s",
+					webhookName,
+					webhookUrl,
+					foundSecret,
+					webHookActive,
+					webhookSSL,
+					webhookContentType,
+					webhookEvents,
+				),
+			)
+
 			if connErr != nil {
 				OutputError(connErr.Error(), true)
 			} else if keyErr != nil {
@@ -783,6 +821,19 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 	defer logFile.Close()
 
+	// Create output file
+	outputFile, err = os.Create(fmt.Sprint("migration-output",time.Now().Format("20060102_150401"), ".csv"))
+	if err != nil {
+		return err
+	}
+	defer outputFile.Close()
+
+	Write2Output(
+		fmt.Sprint(
+			"Repository,Webhook URL,Secret,Active?,Insecure SSL?,Content Type,Webhook Events",
+		),
+	)
+
 	LogLF()
 	Debug("---- VALIDATING FLAGS & ENV VARS ----")
 
@@ -861,6 +912,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		OutputNotice(fmt.Sprint("Vault Path Key: ", vaultPathKeys))
 	}
 	OutputNotice(fmt.Sprintf("Log File: %s", logFile.Name()))
+	OutputNotice(fmt.Sprintf("Output File: %s", outputFile.Name()))
 	OutputNotice(fmt.Sprintf("Read Threads: %d", maxReadThreads))
 	OutputNotice(fmt.Sprintf("Write Threads: %d", maxWriteThreads))
 
