@@ -38,7 +38,9 @@ var (
 	vaultToken          string
 	vaultKvv1           = false
 	logFile             *os.File
-	outputFile          *os.File
+	reposFile           *os.File
+	reposFilePath       string
+	reposFromFile       bool
 	maxReadThreads      int
 	maxWriteThreads     int
 	repositories        []Repository = []Repository{}
@@ -210,6 +212,8 @@ func init() {
 		false,
 		"Auto respond to confirmation prompt",
 	)
+
+	rootCmd.Args = cobra.MaximumNArgs(1)
 }
 
 func Execute() {
@@ -278,25 +282,6 @@ func Log(message string) {
 	)
 	if err != nil {
 		fmt.Println(red("Unable to write to log file."))
-		fmt.Println(red(err))
-		os.Exit(1)
-	}
-}
-
-/** 
- * Write the migration output to a text file so it can be migrated in chunk
- */
-func Write2Output(message string) {
-	if message != "" {
-		message = fmt.Sprint(
-			message,
-		)
-	}
-	_, err := outputFile.WriteString(
-		fmt.Sprintln(message),
-	)
-	if err != nil {
-		fmt.Println(red("Unable to write to output file."))
 		fmt.Println(red(err))
 		os.Exit(1)
 	}
@@ -594,10 +579,6 @@ func LookupWebhooks(repository Repository) {
 		webhookName := repository.Name
 		webhookId := strconv.Itoa(webhook.ID)
 		webhookUrl := webhook.Config.URL
-		webhookContentType := webhook.Config.Content_Type
-		webhookSSL := webhook.Config.Insecure_SSL
-		webHookActive := webhook.Active
-		webhookEvents := webhook.Events
 		webhookSecretFound := "Yes"
 
 		// try to parse the webhook path from the URL the vault-path-key flag is provided
@@ -648,19 +629,6 @@ func LookupWebhooks(repository Repository) {
 			)
 			// try to get the webhook secret value from Vault
 			foundSecret, connErr, keyErr := GetVaultSecret(webhookSecretPath)
-
-			Write2Output(
-				fmt.Sprintf(
-					"%s,%s,%s,%t,%s,%s,%s",
-					webhookName,
-					webhookUrl,
-					foundSecret,
-					webHookActive,
-					webhookSSL,
-					webhookContentType,
-					webhookEvents,
-				),
-			)
 
 			if connErr != nil {
 				OutputError(connErr.Error(), true)
@@ -821,21 +789,18 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 	defer logFile.Close()
 
-	// Create output file
-	outputFile, err = os.Create(fmt.Sprint("migration-output",time.Now().Format("20060102_150401"), ".csv"))
-	if err != nil {
-		return err
-	}
-	defer outputFile.Close()
-
-	Write2Output(
-		fmt.Sprint(
-			"Repository,Webhook URL,Secret,Active?,Insecure SSL?,Content Type,Webhook Events",
-		),
-	)
-
 	LogLF()
 	Debug("---- VALIDATING FLAGS & ENV VARS ----")
+
+	// Check for repos-file argument. If provided, open file.
+	if len(args) != 0 {
+		reposFromFile = true
+		reposFilePath = args[0]
+		reposFile, err = os.Open(reposFilePath)
+		if err != nil {
+			return err
+		}
+	}
 
 	// validate flags provided
 	r, _ := regexp.Compile("^http(s|):(//|)")
@@ -912,7 +877,9 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		OutputNotice(fmt.Sprint("Vault Path Key: ", vaultPathKeys))
 	}
 	OutputNotice(fmt.Sprintf("Log File: %s", logFile.Name()))
-	OutputNotice(fmt.Sprintf("Output File: %s", outputFile.Name()))
+	if reposFromFile {
+		OutputNotice(fmt.Sprintf("Input File: %s", reposFilePath))
+	}
 	OutputNotice(fmt.Sprintf("Read Threads: %d", maxReadThreads))
 	OutputNotice(fmt.Sprintf("Write Threads: %d", maxWriteThreads))
 
@@ -943,39 +910,55 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	LogLF()
 	Debug("---- LISTING REPOSITORIES ----")
 
-	// Loop through pages of repositories, waiting 1 second in between
-	var i = 1
-	for {
-
-		// validate we have API attempts left
-		timeoutErr := ValidateApiRate("graphql")
-		if timeoutErr != nil {
-			OutputError(timeoutErr.Error(), true)
+	if reposFromFile {
+		// Loop through the lines of repositories in the file
+		scanner := bufio.NewScanner(reposFile)
+		for scanner.Scan() {
+			repoName := scanner.Text()
+			repositories = append(repositories, Repository{
+				Name:          repoName,
+				NameWithOwner: organization + "/" + repoName,
+			})
+			Debug(fmt.Sprintf("Enqueuing from file repository '%s'", repoName))
 		}
-
-		// show a suffix next to the spinner for what we are curretnly doing
-		DebugAndStatus(
-			fmt.Sprintf(
-				"Fetching repositories from organization '%s' (page %d)",
-				organization,
-				i,
-			),
-		)
-
-		// make the graphql request
-		graphqlClient.Query("RepoList", &orgRepositoriesQuery, variables)
-
-		// append repositories found to array
-		repositories = append(repositories, orgRepositoriesQuery.Organization.Repositories.Nodes...)
-
-		// if no next page is found, break
-		if !orgRepositoriesQuery.Organization.Repositories.PageInfo.HasNextPage {
-			break
+		if err := scanner.Err(); err != nil {
+			return err
 		}
-		i++
+	} else {
+		// Loop through pages of repositories, waiting 1 second in between
+		var i = 1
+		for {
 
-		// set the end cursor for the page we are on
-		variables["page"] = &orgRepositoriesQuery.Organization.Repositories.PageInfo.EndCursor
+			// validate we have API attempts left
+			timeoutErr := ValidateApiRate("graphql")
+			if timeoutErr != nil {
+				OutputError(timeoutErr.Error(), true)
+			}
+
+			// show a suffix next to the spinner for what we are curretnly doing
+			DebugAndStatus(
+				fmt.Sprintf(
+					"Fetching repositories from organization '%s' (page %d)",
+					organization,
+					i,
+				),
+			)
+
+			// make the graphql request
+			graphqlClient.Query("RepoList", &orgRepositoriesQuery, variables)
+
+			// append repositories found to array
+			repositories = append(repositories, orgRepositoriesQuery.Organization.Repositories.Nodes...)
+
+			// if no next page is found, break
+			if !orgRepositoriesQuery.Organization.Repositories.PageInfo.HasNextPage {
+				break
+			}
+			i++
+
+			// set the end cursor for the page we are on
+			variables["page"] = &orgRepositoriesQuery.Organization.Repositories.PageInfo.EndCursor
+		}
 	}
 
 	LogLF()
