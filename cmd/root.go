@@ -29,9 +29,12 @@ var (
 	// Set up main variables
 	noCache             = false
 	confirm             = false
-	hostname            string
-	organization        string
-	token               string
+	srcHostname         string
+	dstHostname         string
+	srcOrganization     string
+	dstOrganization     string
+	srcToken            string
+	dstToken            string
 	vaultMountpoint     string
 	vaultValueKey       string
 	vaultPathKeys       []string
@@ -56,7 +59,8 @@ var (
 	sp  = spinner.New(spinner.CharSets[2], 100*time.Millisecond)
 
 	// set up clients
-	restClient    api.RESTClient
+	srcRestClient api.RESTClient
+	dstRestClient api.RESTClient
 	graphqlClient api.GQLClient
 
 	// Create the root cobra command
@@ -113,9 +117,9 @@ type Repository struct {
 	URL           string
 }
 type WebHookConfig struct {
-	URL          string
-	Content_Type string
-	Insecure_SSL string
+	URL          string `json:"url"`
+	Content_Type string `json:"content_type"`
+	Insecure_SSL string `json:"insecure_ssl"`
 	Secret       string `json:"secret"`
 	Token        string
 	Digest       string
@@ -123,10 +127,10 @@ type WebHookConfig struct {
 type Webhook struct {
 	ID         int
 	Repository string
-	Name       string
+	Name       string        `json:"name"`
 	Config     WebHookConfig `json:"config"`
-	Events     []string
-	Active     bool
+	Events     []string      `json:"events"`
+	Active     bool          `json:"active"`
 }
 type WebHookPatch struct {
 	URL          string `json:"url"`
@@ -143,20 +147,38 @@ func init() {
 
 	// base flags
 	rootCmd.PersistentFlags().StringVar(
-		&hostname,
-		"hostname",
+		&srcHostname,
+		"source-hostname",
 		"github.com",
-		"GitHub hostname",
+		"Set source GitHub hostname",
 	)
 	rootCmd.PersistentFlags().StringVar(
-		&organization,
-		"org",
+		&dstHostname,
+		"destination-hostname",
+		"github.com",
+		"Set destination GitHub hostname",
+	)
+	rootCmd.PersistentFlags().StringVar(
+		&srcOrganization,
+		"source-org",
 		"",
-		"Organization name",
+		"Set source organization to migrate from",
 	)
 	rootCmd.PersistentFlags().StringVar(
-		&token,
-		"token",
+		&dstOrganization,
+		"destination-org",
+		"",
+		"Set destination organization to migrate to",
+	)
+	rootCmd.PersistentFlags().StringVar(
+		&srcToken,
+		"source-token",
+		"",
+		"Optional token for authentication (uses GitHub CLI built-in authentication)",
+	)
+	rootCmd.PersistentFlags().StringVar(
+		&dstToken,
+		"destination-token",
 		"",
 		"Optional token for authentication (uses GitHub CLI built-in authentication)",
 	)
@@ -315,7 +337,7 @@ func AskForConfirmation(s string) (res bool, err error) {
 	}
 }
 
-func GetOpts(hostname string) (options api.ClientOptions) {
+func GetOpts(hostname, token string) (options api.ClientOptions) {
 	// set options
 	opts := api.ClientOptions{
 		Host:        hostname,
@@ -328,7 +350,7 @@ func GetOpts(hostname string) (options api.ClientOptions) {
 	return opts
 }
 
-func ValidateApiRate(requestType string) (err error) {
+func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 	apiResponse := ApiResponse{}
 	attempts := 0
 
@@ -345,7 +367,7 @@ func ValidateApiRate(requestType string) (err error) {
 		}
 
 		// get the current rate liit left or error out if request fails
-		err = restClient.Get("rate_limit", &apiResponse)
+		err = client.Get("rate_limit", &apiResponse)
 		if err != nil {
 			Debug("Failed to get rate limit from GitHub server.")
 			return err
@@ -540,13 +562,13 @@ func LookupWebhooks(repository Repository) {
 	)
 
 	// validate we have API attempts left
-	timeoutErr := ValidateApiRate("core")
+	timeoutErr := ValidateApiRate(srcRestClient, "core")
 	if timeoutErr != nil {
 		OutputError(timeoutErr.Error(), true)
 	}
 
 	// query for the webhooks on this repository
-	err := restClient.Get(
+	err := srcRestClient.Get(
 		fmt.Sprintf(
 			"repos/%s/hooks",
 			repository.NameWithOwner,
@@ -690,7 +712,7 @@ func LookupWebhooks(repository Repository) {
 	waitGroup.Done()
 }
 
-func PatchWebhooks(webhook Webhook) {
+func CreateWebhook(webhook Webhook) {
 
 	// skip bad webhooks
 	if webhook.Config.Secret == "" {
@@ -706,7 +728,7 @@ func PatchWebhooks(webhook Webhook) {
 	}
 
 	// validate we have API attempts left
-	timeoutErr := ValidateApiRate("core")
+	timeoutErr := ValidateApiRate(dstRestClient, "core")
 	if timeoutErr != nil {
 		OutputError(timeoutErr.Error(), true)
 	}
@@ -714,21 +736,13 @@ func PatchWebhooks(webhook Webhook) {
 	// output what's current processing
 	Debug(
 		fmt.Sprintf(
-			"Patching webhook ID %d...",
+			"Creating webhook ID %d...",
 			webhook.ID,
 		),
 	)
 
-	// set up the encoding reader from the current webhook
-	var webhookToUpdate = WebHookPatch{
-		URL:          webhook.Config.URL,
-		Content_Type: webhook.Config.Content_Type,
-		Insecure_SSL: webhook.Config.Insecure_SSL,
-		Secret:       webhook.Config.Secret,
-	}
-
 	// convert the struct to io.reader
-	data, err := json.Marshal(&webhookToUpdate)
+	data, err := json.Marshal(&webhook)
 	if err != nil {
 		sp.Stop()
 		OutputError(err.Error(), true)
@@ -737,12 +751,11 @@ func PatchWebhooks(webhook Webhook) {
 
 	// post the request
 	webhookResponse := Webhook{}
-	err = restClient.Patch(
+	err = dstRestClient.Post(
 		fmt.Sprintf(
-			"repos/%s/%s/hooks/%d/config",
-			organization,
+			"repos/%s/%s/hooks",
+			dstOrganization,
 			webhook.Repository,
-			webhook.ID,
 		),
 		reader,
 		&webhookResponse,
@@ -804,19 +817,25 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// validate flags provided
 	r, _ := regexp.Compile("^http(s|):(//|)")
-	if r.MatchString(hostname) {
-		OutputError("Hostname contains http(s) prefix and should not.", true)
+	if r.MatchString(srcHostname) {
+		OutputError("Source hostname contains http(s) prefix and should not.", true)
 	}
-	if organization == "" {
-		OutputError("An organization must be provided.", true)
+	if r.MatchString(dstHostname) {
+		OutputError("Destination hostname contains http(s) prefix and should not.", true)
+	}
+	if srcOrganization == "" {
+		OutputError("A source organization must be provided.", true)
+	}
+	if dstOrganization == "" {
+		OutputError("A destination organization must be provided.", true)
 	}
 
 	// get clients set-up with the source org hostname
-	opts := GetOpts(hostname)
-	restClient, err = gh.RESTClient(&opts)
+	opts := GetOpts(srcHostname, srcToken)
+	srcRestClient, err = gh.RESTClient(&opts)
 	if err != nil {
 		Debug(fmt.Sprint("Error object: ", err))
-		OutputError("Failed to set up REST client. You must be logged in or provide a token.", true)
+		OutputError("Failed to set up source REST client. You must be logged in or provide a token.", true)
 	}
 
 	graphqlClient, err := gh.GQLClient(&opts)
@@ -831,12 +850,20 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		OutputError("You must provide a Vault token or Vault role ID and secret ID for authentication.", true)
 	}
 
+	// get clients set-up with the destination org hostname
+	opts = GetOpts(dstHostname, dstToken)
+	dstRestClient, err = gh.RESTClient(&opts)
+	if err != nil {
+		Debug(fmt.Sprint("Error object: ", err))
+		OutputError("Failed to set up destination REST client. You must be logged in or provide a token.", true)
+	}
+
 	// attempt to validate the auth session OR provided token if it isn't an APP token
 	validateUser := ""
-	if !strings.HasPrefix(token, "ghs_") {
+	if !strings.HasPrefix(srcToken, "ghs_") {
 		// validate an app token
 		validateObject := User{}
-		validateErr := restClient.Get("user", &validateObject)
+		validateErr := srcRestClient.Get("user", &validateObject)
 		if validateErr != nil {
 			OutputError(validateErr.Error(), true)
 		}
@@ -844,25 +871,27 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	// print out information about the process
-	OutputNotice(fmt.Sprint("Host: ", hostname))
+	OutputNotice(fmt.Sprint("Source Host: ", srcHostname))
+	OutputNotice(fmt.Sprint("Destination Host: ", dstHostname))
 	if validateUser != "" {
 		OutputNotice(fmt.Sprint("User: ", validateUser))
 	}
 	authMethod := "Auth Method: "
 	switch {
-	case token == "":
+	case srcToken == "":
 		authMethod += "CLI Pass-Through"
-	case token != "" && strings.HasPrefix(token, "gho_"):
+	case srcToken != "" && strings.HasPrefix(srcToken, "gho_"):
 		authMethod += "OAuth Token"
-	case token != "" && strings.HasPrefix(token, "ghp_"):
+	case srcToken != "" && strings.HasPrefix(srcToken, "ghp_"):
 		authMethod += "Personal Access Token"
-	case token != "" && strings.HasPrefix(token, "ghs_"):
+	case srcToken != "" && strings.HasPrefix(srcToken, "ghs_"):
 		authMethod += "App Token"
 	default:
 		authMethod += "Unknown (couldn't detect type)"
 	}
 	OutputNotice(authMethod)
-	OutputNotice(fmt.Sprint("Organization: ", organization))
+	OutputNotice(fmt.Sprint("Source Organization: ", srcOrganization))
+	OutputNotice(fmt.Sprint("Destination Organization: ", dstOrganization))
 
 	vaultVersion := "2"
 	if vaultKvv1 {
@@ -900,7 +929,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// get our variables set up for the graphql query
 	variables := map[string]interface{}{
-		"owner": graphql.String(organization),
+		"owner": graphql.String(srcOrganization),
 		"page":  (*graphql.String)(nil),
 	}
 
@@ -917,7 +946,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			repoName := scanner.Text()
 			repositories = append(repositories, Repository{
 				Name:          repoName,
-				NameWithOwner: organization + "/" + repoName,
+				NameWithOwner: srcOrganization + "/" + repoName,
 			})
 			Debug(fmt.Sprintf("Enqueuing from file repository '%s'", repoName))
 		}
@@ -930,7 +959,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		for {
 
 			// validate we have API attempts left
-			timeoutErr := ValidateApiRate("graphql")
+			timeoutErr := ValidateApiRate(srcRestClient, "graphql")
 			if timeoutErr != nil {
 				OutputError(timeoutErr.Error(), true)
 			}
@@ -939,7 +968,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			DebugAndStatus(
 				fmt.Sprintf(
 					"Fetching repositories from organization '%s' (page %d)",
-					organization,
+					srcOrganization,
 					i,
 				),
 			)
@@ -1067,14 +1096,14 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	sp.Restart()
-	Debug("---- PATCHING WEBHOOKS ----")
+	Debug("---- CREATING WEBHOOKS ----")
 
 	// set some vars that can be adjusted in looping
 	webhooksToProcess := webhooks
 	maxWebhookThreads := maxWriteThreads
 
 	// do this while there are elements left
-	Debug("Batching webhook patching...")
+	Debug("Batching webhook creating...")
 	batchNum = 1
 	for len(webhooksToProcess) > 0 {
 		// adjust number of threads
@@ -1090,7 +1119,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		}
 		DebugAndStatus(
 			fmt.Sprintf(
-				"Running webhook patching batch #%d (%d threads)...",
+				"Running webhook creating batch #%d (%d threads)...",
 				batchNum,
 				maxWebhookThreads,
 			),
@@ -1104,7 +1133,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		// set up our waitgroup
 		Debug(
 			fmt.Sprintf(
-				"Creating %d webhook patching threads...",
+				"Creating %d webhook creating threads...",
 				len(batch),
 			),
 		)
@@ -1113,13 +1142,13 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		for i := 0; i < len(batch); i++ {
 			Debug(
 				fmt.Sprintf(
-					"Running thread %d of %d for webhook patching ID %d",
+					"Running thread %d of %d for webhook creating ID %d",
 					i+1,
 					len(batch),
 					batch[i].ID,
 				),
 			)
-			go PatchWebhooks(batch[i])
+			go CreateWebhook(batch[i])
 		}
 		// wait for threads to finish
 		waitGroup.Wait()
