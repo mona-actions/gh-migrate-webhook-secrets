@@ -32,29 +32,33 @@ $ gh extension upgrade migrate-webhook-secrets
 ## Usage
 
 ```txt
-$ gh migrate-webhook-secrets [flags]
+$ gh migrate-webhook-secrets [flags] [repos-file]
 ```
 
 ```txt
 GitHub CLI extension to migrate webhook secrets. Supports HashiCorp Vault (KV V1 & V2) as the secret storage intermediary.
 
 Usage:
-  gh migrate-webhook-secrets [flags]
+  gh migrate-webhook-secrets [flags] [repos-file]
 
 Flags:
-      --confirm                   Auto respond to confirmation prompt
-  -h, --help                      help for gh
-      --hostname string           GitHub hostname (default "github.com")
-      --no-cache                  Disable cache for GitHub API requests
-      --org string                Organization name
-      --read-threads int          Number of threads to process at a time. (default 5)
-      --token string              Optional token for authentication (uses GitHub CLI built-in authentication)
-      --vault-kvv1                Use Vault KVv1 instead of KVv2
-      --vault-mountpoint string   The mount point of the secrets on the Vault server (default "secret")
-      --vault-path-keys strings   The keys in the webhook URL (ex: <webhook-server>?secret=<vault-path-key>) to use for finding the corresponding secret in order to create Vault path
-      --vault-value-key string    The key in the Vault secret corresponding to the webhook secret value (default "value")
-  -v, --version                   version for gh
-      --write-threads int         Number of write threads to process at a time. (WARNING: increasing beyond 1 can trigger the secondary rate limit.) (default 1)
+      --confirm                       Auto respond to confirmation prompt
+      --destination-hostname string   Set destination GitHub hostname (default "github.com")
+      --destination-org string        Set destination organization to migrate to
+      --destination-token string      Optional token for authentication (uses GitHub CLI built-in authentication)
+  -h, --help                          help for gh
+      --no-cache                      Disable cache for GitHub API requests
+      --read-threads int              Number of threads to process at a time. (default 5)
+      --source-hostname string        Set source GitHub hostname (default "github.com")
+      --source-org string             Set source organization to migrate from
+      --source-token string           Optional token for authentication (uses GitHub CLI built-in authentication)
+      --vault-kvv1                    Use Vault KVv1 instead of KVv2
+      --vault-mountpoint string       The mount point of the secrets on the Vault server (default "secret")
+      --vault-path-keys strings       The key in the webhook URL (ex: <webhook-server>?secret=<vault-path-key>) to use for finding the corresponding secret
+      --vault-value-key string        The key in the Vault secret corresponding to the webhook secret value (default "value")
+  -v, --version                       version for gh
+      --write-threads int             Number of write threads to process at a time. (WARNING: increasing beyond 1 can trigger the secondary rate limit.) (default 1)
+
 ```
 
 ## Notes
