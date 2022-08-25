@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/briandowns/spinner"
 	"github.com/cli/go-gh"
@@ -55,8 +56,9 @@ var (
 	patchSucceeded      int = 0
 
 	// Create some colors and a spinner
-	red = color.New(color.FgRed).SprintFunc()
-	sp  = spinner.New(spinner.CharSets[2], 100*time.Millisecond)
+	red  = color.New(color.FgRed).SprintFunc()
+	cyan = color.New(color.FgCyan).SprintFunc()
+	sp   = spinner.New(spinner.CharSets[2], 100*time.Millisecond)
 
 	// set up clients
 	srcRestClient api.RESTClient
@@ -68,7 +70,7 @@ var (
 		Use:           "gh migrate-webhook-secrets",
 		Short:         "GitHub CLI extension to migrate webhook secrets",
 		Long:          `GitHub CLI extension to migrate webhook secrets. Supports HashiCorp Vault (KV V1 & V2) as the secret storage intermediary.`,
-		Version:       "0.2.1",
+		Version:       "0.3.0",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          CloneWebhooks,
@@ -125,12 +127,15 @@ type WebHookConfig struct {
 	Digest       string
 }
 type Webhook struct {
-	ID         int
-	Repository string
-	Name       string        `json:"name"`
-	Config     WebHookConfig `json:"config"`
-	Events     []string      `json:"events"`
-	Active     bool          `json:"active"`
+	ID            int
+	Repository    string
+	Name          string        `json:"name"`
+	Config        WebHookConfig `json:"config"`
+	Events        []string      `json:"events"`
+	Active        bool          `json:"active"`
+	Exists        bool
+	DstRepoExists bool
+	Skip          bool
 }
 type WebHookPatch struct {
 	URL          string `json:"url"`
@@ -251,6 +256,12 @@ func ExitOnError(err error) {
 	}
 }
 
+func OutputFlags(key string, value string) {
+	sep := ": "
+	fmt.Println(fmt.Sprint(cyan(key), sep, value))
+	Log(fmt.Sprint(key, sep, value))
+}
+
 func OutputNotice(message string) {
 	Output(message, "default", false, false)
 }
@@ -273,6 +284,7 @@ func Output(message string, color string, isErr bool, exit bool) {
 	}
 	fmt.Println(message)
 	if exit {
+		fmt.Println("")
 		os.Exit(1)
 	}
 }
@@ -315,6 +327,35 @@ func LF() {
 
 func LogLF() {
 	Log("")
+}
+
+func Truncate(str string, limit int) string {
+	lastSpaceIx := -1
+	len := 0
+	for i, r := range str {
+		if unicode.IsSpace(r) {
+			lastSpaceIx = i
+		}
+		len++
+		if len >= limit {
+			if lastSpaceIx != -1 {
+				return fmt.Sprint(str[:lastSpaceIx], "...")
+			} else {
+				return fmt.Sprint(str[:limit], "...")
+			}
+		}
+	}
+	return str
+}
+
+func GetReaderFromObject(thisStruct interface{}) *bytes.Reader {
+	// convert the struct to io.reader
+	data, err := json.Marshal(&thisStruct)
+	if err != nil {
+		sp.Stop()
+		OutputError(err.Error(), true)
+	}
+	return bytes.NewReader(data)
 }
 
 func AskForConfirmation(s string) (res bool, err error) {
@@ -551,7 +592,8 @@ func GetVaultSecret(key string) (secret string, connErr error, pathErr error) {
 func LookupWebhooks(repository Repository) {
 
 	// set a var to store the webhook array in
-	webhooksResponse := []Webhook{}
+	srcWebhooksResponse := []Webhook{}
+	dstWebhooksResponse := []Webhook{}
 
 	// print out current repository information
 	Debug(
@@ -568,30 +610,69 @@ func LookupWebhooks(repository Repository) {
 	}
 
 	// query for the webhooks on this repository
-	err := srcRestClient.Get(
+	// this also validates the source repository
+	srcLookupErr := srcRestClient.Get(
 		fmt.Sprintf(
-			"repos/%s/hooks",
-			repository.NameWithOwner,
+			"repos/%s/%s/hooks",
+			srcOrganization,
+			repository.Name,
 		),
-		&webhooksResponse,
+		&srcWebhooksResponse,
 	)
-	if err != nil {
-		OutputError(err.Error(), true)
+
+	// Non-200 errors should fail out
+	if srcLookupErr != nil {
+		OutputError(srcLookupErr.Error(), true)
 	}
 
-	if len(webhooksResponse) == 0 {
+	// log when no results are found (success, but no hooks)
+	if len(srcWebhooksResponse) == 0 {
 		Debug(
 			fmt.Sprintf(
 				"No webhooks found for repository '%s'.",
 				repository.Name,
 			),
 		)
+	} else {
+		Debug(
+			fmt.Sprintf(
+				"Found %d webhooks for repository '%s'.",
+				len(srcWebhooksResponse),
+				repository.Name,
+			),
+		)
+	}
+
+	// validate we have API attempts left on destination
+	timeoutErr = ValidateApiRate(dstRestClient, "core")
+	if timeoutErr != nil {
+		OutputError(timeoutErr.Error(), true)
+	}
+
+	// query for webhooks on the destination
+	err := dstRestClient.Get(
+		fmt.Sprintf(
+			"repos/%s/%s/hooks",
+			dstOrganization,
+			repository.Name,
+		),
+		&dstWebhooksResponse,
+	)
+	// Non-200 errors should fail out
+	dstRepoExists := true
+	if err != nil {
+		dstRepoExists = false
+		Log(fmt.Sprint("[WARNING] Could not find destination repo. Will skip webhooks. Error: ", err.Error()))
 	}
 
 	// add the webhooks to the table data for visibility
-	for i, webhook := range webhooksResponse {
-		// add the repo name the webhook
+	for i, webhook := range srcWebhooksResponse {
+		// update properties on the webhook
 		webhook.Repository = repository.Name
+		webhook.DstRepoExists = dstRepoExists
+		webhook.Exists = false
+		webhook.Config.Secret = "" // always clear this out as it contains the tokenized version (ex: ********)
+		webhook.Skip = true
 
 		// set variables for looking up secrets
 		webhookLookupSecret := true
@@ -601,10 +682,75 @@ func LookupWebhooks(repository Repository) {
 		webhookName := repository.Name
 		webhookId := strconv.Itoa(webhook.ID)
 		webhookUrl := webhook.Config.URL
-		webhookSecretFound := "Yes"
+
+		// only needs this var for secret lookup stuff
+		webhookSecretFound := "Unknown"
+		webhookAction := "Unknown"
+
+		if !dstRepoExists {
+			webhookLookupSecret = false
+			webhookSecretFound = "Skipped"
+			webhookAction = "Skip: No Destination Repo"
+		}
+
+		// if the destination has webhooks, see if there's a match already
+		if len(dstWebhooksResponse) > 0 && dstRepoExists {
+
+			Debug(
+				fmt.Sprintf(
+					"Looking up webhook URL %s from repository %s in destination webhooks...",
+					webhook.Config.URL,
+					webhook.Repository,
+				),
+			)
+
+			// loop through all destination webhooks
+			for _, dstWebhook := range dstWebhooksResponse {
+				Debug(
+					fmt.Sprintf(
+						"Comparing webhook URL '%s' to destination webhook '%s' in repository %s...",
+						webhook.Config.URL,
+						dstWebhook.Config.URL,
+						repository.Name,
+					),
+				)
+				// if the repo and URL are the same, there's a match!
+				if dstWebhook.Config.URL == webhook.Config.URL {
+					webhook.Exists = true
+					webhook.ID = dstWebhook.ID // have to overwrite the ID for patch to work
+					webhookAction = "Update"
+					Debug(
+						fmt.Sprintf(
+							"Found matching URL %s in repository %s in destination webhooks!",
+							webhook.Config.URL,
+							webhook.Repository,
+						),
+					)
+				}
+			}
+
+			if !webhook.Exists {
+				webhookAction = "Create"
+				Debug(
+					fmt.Sprintf(
+						"No matching URL %s was found in repository %s in destination webhooks.",
+						webhook.Config.URL,
+						webhook.Repository,
+					),
+				)
+			}
+		} else if !dstRepoExists {
+			Debug(
+				fmt.Sprintf(
+					"Skipping URL %s because destination repository %s does not exist.",
+					webhook.Config.URL,
+					webhook.Repository,
+				),
+			)
+		}
 
 		// try to parse the webhook path from the URL the vault-path-key flag is provided
-		if len(vaultPathKeys) > 0 {
+		if len(vaultPathKeys) > 0 && dstRepoExists {
 			var webhookSecretPaths []string
 
 			for _, vaultPathKey := range vaultPathKeys {
@@ -613,12 +759,22 @@ func LookupWebhooks(repository Repository) {
 				if strings.Contains(webhook.Config.URL, vaultPathKey) && len(webhookUrlPieces) == 2 {
 
 					// split the URL parameters by &
-					webhookParameters := strings.Split(webhookUrlPieces[1], "&")
+					webhookParameters := strings.Split(
+						webhookUrlPieces[1],
+						"&",
+					)
 					// loop pieces and find the value from the path key
 					for _, piece := range webhookParameters {
 						if strings.HasPrefix(piece, vaultPathKey) {
-							webhookSecretPaths = append(webhookSecretPaths, strings.Replace(piece, fmt.Sprint(vaultPathKey, "="), "", 1))
-							// webhookSecretPathEntry = strings.Replace(piece, fmt.Sprint(vaultPathKey, "="), "", 1)
+							webhookSecretPaths = append(
+								webhookSecretPaths,
+								strings.Replace(
+									piece,
+									fmt.Sprint(vaultPathKey, "="),
+									"",
+									1,
+								),
+							)
 							break
 						}
 					}
@@ -654,7 +810,10 @@ func LookupWebhooks(repository Repository) {
 
 			if connErr != nil {
 				OutputError(connErr.Error(), true)
+				webhookAction = "Skip: Secret lookup error"
+				foundSecret = "test"
 			} else if keyErr != nil {
+				webhookAction = "Skip: Secret lookup error"
 				missingSecrets++
 				webhookSecretFound = keyErr.Error()
 				Debug(
@@ -665,18 +824,24 @@ func LookupWebhooks(repository Repository) {
 					),
 				)
 			}
-			webhook.Config.Secret = foundSecret
+
+			if foundSecret != "" {
+				webhookSecretFound = "Yes"
+				webhook.Config.Secret = foundSecret
+				webhook.Skip = false
+			}
 		}
 
 		Debug(fmt.Sprint("Secret look-up results: ", webhookSecretFound))
 
 		// modify output when a secret is not found
-		if webhook.Config.Secret == "" {
+		if webhook.Skip {
 			webhookName = red(webhookName)
 			webhookId = red(webhookId)
 			webhookUrl = red(webhookUrl)
 			webhookSecretPath = red(webhookSecretPath)
 			webhookSecretFound = red(webhookSecretFound)
+			webhookAction = red(webhookAction)
 			Debug(
 				fmt.Sprintf(
 					"[ERROR] Webhook ID %d: no secret found or value was empty.",
@@ -692,21 +857,22 @@ func LookupWebhooks(repository Repository) {
 			)
 		}
 
-		// overwrite the webhook at the index in the array
-		webhooksResponse[i] = webhook
-
 		// add to table data
 		webhookResultsTable = append(webhookResultsTable, []string{
 			webhookName,
 			webhookId,
-			webhookUrl,
+			Truncate(webhookUrl, 80),
+			webhookAction,
 			webhookSecretPath,
-			webhookSecretFound,
+			Truncate(webhookSecretFound, 40),
 		})
+
+		// overwrite the source webhook with the new attributes
+		srcWebhooksResponse[i] = webhook
 	}
 
-	// append to the list of webooks
-	webhooks = append(webhooks, webhooksResponse...)
+	// add these webhooks to the master list to process
+	webhooks = append(webhooks, srcWebhooksResponse...)
 
 	// close out this thread
 	waitGroup.Done()
@@ -714,15 +880,36 @@ func LookupWebhooks(repository Repository) {
 
 func CreateWebhook(webhook Webhook) {
 
-	// skip bad webhooks
-	if webhook.Config.Secret == "" {
+	// skip if webhook is missing a secret or the destination repo doesn't exist
+	if webhook.Skip {
 		patchFailed++
-		Debug(
-			fmt.Sprintf(
-				"Skipping webhook ID %d because no secret value was found.",
-				webhook.ID,
-			),
+		messagePre := fmt.Sprintf(
+			"Skipping webhook ID %d because ",
+			webhook.ID,
 		)
+		if webhook.Config.Secret == "" {
+			Debug(
+				fmt.Sprint(
+					messagePre,
+					"no secret value was found.",
+				),
+			)
+		} else if !webhook.DstRepoExists {
+			Debug(
+				fmt.Sprintf(
+					messagePre,
+					"the destination repository %s does not exist.",
+					webhook.Repository,
+				),
+			)
+		} else {
+			Debug(
+				fmt.Sprint(
+					messagePre,
+					"of an unknown error.",
+				),
+			)
+		}
 		waitGroup.Done()
 		return
 	}
@@ -733,45 +920,70 @@ func CreateWebhook(webhook Webhook) {
 		OutputError(timeoutErr.Error(), true)
 	}
 
-	// output what's current processing
-	Debug(
-		fmt.Sprintf(
-			"Creating webhook ID %d...",
-			webhook.ID,
-		),
-	)
-
-	// convert the struct to io.reader
-	data, err := json.Marshal(&webhook)
-	if err != nil {
-		sp.Stop()
-		OutputError(err.Error(), true)
-	}
-	reader := bytes.NewReader(data)
-
-	// post the request
-	webhookResponse := Webhook{}
-	err = dstRestClient.Post(
-		fmt.Sprintf(
-			"repos/%s/%s/hooks",
-			dstOrganization,
-			webhook.Repository,
-		),
-		reader,
-		&webhookResponse,
-	)
-
-	// validate the request worked.
-	if err != nil {
-
-		patchFailed++
-
-		// log the error
+	// determine whether to update or create
+	var action string
+	var writeErr error
+	if webhook.Exists {
+		// update webhook
+		action = "patch"
 		Debug(
 			fmt.Sprintf(
-				"[ERROR] Webhook ID %d: Patch failed - %s",
+				"Updating webhook %s in repo %s...",
+				webhook.Config.URL,
+				webhook.Repository,
+			),
+		)
+		// set up the encoding reader from the current webhook
+		webhookToUpdate := WebHookPatch{
+			URL:          webhook.Config.URL,
+			Content_Type: webhook.Config.Content_Type,
+			Insecure_SSL: webhook.Config.Insecure_SSL,
+			Secret:       webhook.Config.Secret,
+		}
+		reader := GetReaderFromObject(webhookToUpdate)
+		webhookResponse := Webhook{}
+		writeErr = dstRestClient.Patch(
+			fmt.Sprintf(
+				"repos/%s/%s/hooks/%d/config",
+				dstOrganization,
+				webhook.Repository,
 				webhook.ID,
-				err.Error(),
+			),
+			reader,
+			&webhookResponse,
+		)
+	} else {
+		// create webhook
+		action = "post"
+		Debug(
+			fmt.Sprintf(
+				"Creating webhook %s in repo %s...",
+				webhook.Config.URL,
+				webhook.Repository,
+			),
+		)
+		reader := GetReaderFromObject(webhook)
+		webhookResponse := Webhook{}
+		writeErr = dstRestClient.Post(
+			fmt.Sprintf(
+				"repos/%s/%s/hooks",
+				dstOrganization,
+				webhook.Repository,
+			),
+			reader,
+			&webhookResponse,
+		)
+	}
+
+	// validate the request worked.
+	if writeErr != nil {
+		patchFailed++
+		Debug(
+			fmt.Sprintf(
+				"[ERROR] Webhook URL %s: %s failed - %s",
+				webhook.Config.URL,
+				action,
+				writeErr.Error(),
 			),
 		)
 
@@ -779,8 +991,9 @@ func CreateWebhook(webhook Webhook) {
 		// update success count.
 		Debug(
 			fmt.Sprintf(
-				"Webhook ID %d : Successfully patched.",
-				webhook.ID,
+				"Webhook URL %s : %s succeeded.",
+				webhook.Config.URL,
+				action,
 			),
 		)
 		patchSucceeded++
@@ -802,7 +1015,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 	defer logFile.Close()
 
-	LogLF()
+	LF()
 	Debug("---- VALIDATING FLAGS & ENV VARS ----")
 
 	// Check for repos-file argument. If provided, open file.
@@ -871,46 +1084,48 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	// print out information about the process
-	OutputNotice(fmt.Sprint("Source Host: ", srcHostname))
-	OutputNotice(fmt.Sprint("Destination Host: ", dstHostname))
+	OutputFlags("Source Host", srcHostname)
+	OutputFlags("Destination Host", dstHostname)
 	if validateUser != "" {
-		OutputNotice(fmt.Sprint("User: ", validateUser))
+		OutputFlags("User: ", validateUser)
 	}
-	authMethod := "Auth Method: "
+	authMethodTitle := "Auth Method: "
+	authMethod := ""
 	switch {
 	case srcToken == "":
-		authMethod += "CLI Pass-Through"
+		authMethod = "CLI Pass-Through"
 	case srcToken != "" && strings.HasPrefix(srcToken, "gho_"):
-		authMethod += "OAuth Token"
+		authMethod = "OAuth Token"
 	case srcToken != "" && strings.HasPrefix(srcToken, "ghp_"):
-		authMethod += "Personal Access Token"
+		authMethod = "Personal Access Token"
 	case srcToken != "" && strings.HasPrefix(srcToken, "ghs_"):
-		authMethod += "App Token"
+		authMethod = "App Token"
 	default:
-		authMethod += "Unknown (couldn't detect type)"
+		authMethod = "Unknown (couldn't detect type)"
 	}
-	OutputNotice(authMethod)
-	OutputNotice(fmt.Sprint("Source Organization: ", srcOrganization))
-	OutputNotice(fmt.Sprint("Destination Organization: ", dstOrganization))
+	OutputFlags(authMethodTitle, authMethod)
+
+	OutputFlags("Source Organization", srcOrganization)
+	OutputFlags("Destination Organization", dstOrganization)
 
 	vaultVersion := "2"
 	if vaultKvv1 {
 		vaultVersion = "1"
 	}
-	OutputNotice(fmt.Sprint("Vault KV Version: ", "v", vaultVersion))
+	OutputFlags("Vault KV Version", fmt.Sprint("v", vaultVersion))
 
 	if vaultMountpoint != "" {
-		OutputNotice(fmt.Sprint("Vault Mount Point: ", vaultMountpoint))
+		OutputFlags("Vault Mount Point", vaultMountpoint)
 	}
 	if len(vaultPathKeys) > 0 {
-		OutputNotice(fmt.Sprint("Vault Path Key: ", vaultPathKeys))
+		OutputFlags("Vault Path Key", strings.Join(vaultPathKeys[:], ","))
 	}
-	OutputNotice(fmt.Sprintf("Log File: %s", logFile.Name()))
+	OutputFlags("Log File", logFile.Name())
 	if reposFromFile {
-		OutputNotice(fmt.Sprintf("Input File: %s", reposFilePath))
+		OutputFlags("Input File", reposFilePath)
 	}
-	OutputNotice(fmt.Sprintf("Read Threads: %d", maxReadThreads))
-	OutputNotice(fmt.Sprintf("Write Threads: %d", maxWriteThreads))
+	OutputFlags("Read Threads", strconv.Itoa(maxReadThreads))
+	OutputFlags("Write Threads", strconv.Itoa(maxWriteThreads))
 
 	// test vault connection
 	vaultClient, err := GetVaultClient()
@@ -990,8 +1205,12 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
+	// ----------------------------------------------------------------------
+	// --------- GETTING SOURCE WEBHOOKS ------------------------------------
+	// ----------------------------------------------------------------------
+
 	LogLF()
-	Debug("---- GETTING ALL WEBHOOKS ----")
+	Debug("---- GETTING WEBHOOKS ----")
 
 	// set up table header for displaying of data
 	Debug("Creating table data for display...")
@@ -1000,43 +1219,44 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			"Repository",
 			"ID",
 			"Hook URL",
+			"Action",
 			"Secret Path",
 			"Secret Found?",
 		},
 	}
 
 	// set some vars that can be adjusted in looping
-	repositoriesToProcess := repositories
-	maxRepoThreads := maxReadThreads
+	srcRepositoriesToProcess := repositories
+	srcMaxRepoThreads := maxReadThreads
 
 	// do this while there are elements left
 	Debug("Batching repository webhook reads...")
-	batchNum := 1
-	for len(repositoriesToProcess) > 0 {
+	srcBatchNum := 1
+	for len(srcRepositoriesToProcess) > 0 {
 		// adjust number of threads
-		if len(repositoriesToProcess) < maxRepoThreads {
+		if len(srcRepositoriesToProcess) < srcMaxRepoThreads {
 			Debug(
 				fmt.Sprintf(
 					"Setting number of threads to %d because there are only %d repositories left.",
-					len(repositoriesToProcess),
-					len(repositoriesToProcess),
+					len(srcRepositoriesToProcess),
+					len(srcRepositoriesToProcess),
 				),
 			)
-			maxRepoThreads = len(repositoriesToProcess)
+			srcMaxRepoThreads = len(srcRepositoriesToProcess)
 		}
 		DebugAndStatus(
 			fmt.Sprintf(
 				"Running webhook lookup batch #%d (%d threads)...",
-				batchNum,
-				maxRepoThreads,
+				srcBatchNum,
+				srcMaxRepoThreads,
 			),
 		)
 		// create our batch to process from the first X elements
-		batch := repositoriesToProcess[:maxRepoThreads]
+		batch := srcRepositoriesToProcess[:srcMaxRepoThreads]
 		Debug(fmt.Sprintf("Repositories in this batch: %d", len(batch)))
 		// cut those elements off of the original array
-		repositoriesToProcess = repositoriesToProcess[len(batch):]
-		Debug(fmt.Sprintf("Repositories left: %d", len(repositoriesToProcess)))
+		srcRepositoriesToProcess = srcRepositoriesToProcess[len(batch):]
+		Debug(fmt.Sprintf("Repositories left: %d", len(srcRepositoriesToProcess)))
 		// set up our waitgroup
 		Debug(
 			fmt.Sprintf(
@@ -1059,11 +1279,15 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		}
 		// wait for threads to finish
 		waitGroup.Wait()
-		batchNum++
+		srcBatchNum++
 	}
 
 	// stop the spinner animation
 	sp.Stop()
+
+	// ---------------------------------------------------------------------
+	// --------- OUTPUTTING WEBHOOKS FOUND ---------------------------------
+	// ---------------------------------------------------------------------
 
 	// show the results
 	OutputNotice("Webhooks Found: ")
@@ -1072,6 +1296,23 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 	// output table
 	pterm.DefaultTable.WithHasHeader().WithHeaderRowSeparator("-").WithData(webhookResultsTable).Render()
 	LF()
+
+	// ----------------------------------------------------------------------
+	// --------- VALIDATE THERE ARE ANY WEBHOOKS TO UPDATE ------------------
+	// ----------------------------------------------------------------------
+	webhooksToSkip := 0
+	for _, webhook := range webhooks {
+		if webhook.Skip {
+			webhooksToSkip++
+		}
+	}
+	if webhooksToSkip == len(webhooks) {
+		OutputError("No webhooks to update.", true)
+	}
+
+	// ----------------------------------------------------------------------
+	// --------- PROMPTING FOR CONFIRMATION ---------------------------------
+	// ----------------------------------------------------------------------
 
 	// confirm the executor wants to proceed
 	if !confirm {
@@ -1095,8 +1336,12 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 		LF()
 	}
 
+	// ----------------------------------------------------------------------
+	// --------- CREATING OR UPDATING WEBHOOKS ------------------------------
+	// ----------------------------------------------------------------------
+
 	sp.Restart()
-	Debug("---- CREATING WEBHOOKS ----")
+	Debug("---- CREATING OR UPDATING WEBHOOKS ----")
 
 	// set some vars that can be adjusted in looping
 	webhooksToProcess := webhooks
@@ -1104,7 +1349,7 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 
 	// do this while there are elements left
 	Debug("Batching webhook creating...")
-	batchNum = 1
+	batchNum := 1
 	for len(webhooksToProcess) > 0 {
 		// adjust number of threads
 		if len(webhooksToProcess) < maxWebhookThreads {
@@ -1177,6 +1422,8 @@ func CloneWebhooks(cmd *cobra.Command, args []string) (err error) {
 			),
 		)
 	}
+
+	LF()
 
 	// always return
 	return err
