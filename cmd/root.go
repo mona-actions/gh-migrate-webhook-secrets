@@ -813,9 +813,8 @@ func LookupWebhooks(repository Repository) {
 			foundSecret, connErr, keyErr := GetVaultSecret(webhookSecretPath)
 
 			if connErr != nil {
+				webhookAction = "Skip: Connection error"
 				OutputError(connErr.Error(), true)
-				webhookAction = "Skip: Secret lookup error"
-				foundSecret = "test"
 			} else if keyErr != nil {
 				webhookAction = "Skip: Secret lookup error"
 				missingSecrets++
