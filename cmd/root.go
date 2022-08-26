@@ -137,6 +137,10 @@ type Webhook struct {
 	DstRepoExists bool
 	Skip          bool
 }
+type WebHookUpdate struct {
+	Active bool     `json:"active"`
+	Events []string `json:"events"`
+}
 type WebHookPatch struct {
 	URL          string `json:"url"`
 	Content_Type string `json:"content_type"`
@@ -933,25 +937,45 @@ func CreateWebhook(webhook Webhook) {
 				webhook.Repository,
 			),
 		)
-		// set up the encoding reader from the current webhook
-		webhookToUpdate := WebHookPatch{
-			URL:          webhook.Config.URL,
-			Content_Type: webhook.Config.Content_Type,
-			Insecure_SSL: webhook.Config.Insecure_SSL,
-			Secret:       webhook.Config.Secret,
-		}
-		reader := GetReaderFromObject(webhookToUpdate)
+		// instantiate a Webhook struct for the response
 		webhookResponse := Webhook{}
+		// update the status and events
+		webhookToUpdate := WebHookUpdate{
+			Active: webhook.Active,
+			Events: webhook.Events,
+		}
+		readerUpdate := GetReaderFromObject(webhookToUpdate)
 		writeErr = dstRestClient.Patch(
 			fmt.Sprintf(
-				"repos/%s/%s/hooks/%d/config",
+				"repos/%s/%s/hooks/%d",
 				dstOrganization,
 				webhook.Repository,
 				webhook.ID,
 			),
-			reader,
+			readerUpdate,
 			&webhookResponse,
 		)
+		// only proceed if previous step didn't fail
+		if writeErr == nil {
+			// patch the config
+			webhookToPatch := WebHookPatch{
+				URL:          webhook.Config.URL,
+				Content_Type: webhook.Config.Content_Type,
+				Insecure_SSL: webhook.Config.Insecure_SSL,
+				Secret:       webhook.Config.Secret,
+			}
+			readerPatch := GetReaderFromObject(webhookToPatch)
+			writeErr = dstRestClient.Patch(
+				fmt.Sprintf(
+					"repos/%s/%s/hooks/%d/config",
+					dstOrganization,
+					webhook.Repository,
+					webhook.ID,
+				),
+				readerPatch,
+				&webhookResponse,
+			)
+		}
 	} else {
 		// create webhook
 		action = "post"
