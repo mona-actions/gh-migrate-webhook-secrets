@@ -70,7 +70,7 @@ var (
 		Use:           "gh migrate-webhook-secrets",
 		Short:         "GitHub CLI extension to migrate webhook secrets",
 		Long:          `GitHub CLI extension to migrate webhook secrets. Supports HashiCorp Vault (KV V1 & V2) as the secret storage intermediary.`,
-		Version:       "0.3.0",
+		Version:       "0.3.1",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          CloneWebhooks,
@@ -136,6 +136,10 @@ type Webhook struct {
 	Exists        bool
 	DstRepoExists bool
 	Skip          bool
+}
+type WebHookUpdate struct {
+	Active bool     `json:"active"`
+	Events []string `json:"events"`
 }
 type WebHookPatch struct {
 	URL          string `json:"url"`
@@ -933,25 +937,45 @@ func CreateWebhook(webhook Webhook) {
 				webhook.Repository,
 			),
 		)
-		// set up the encoding reader from the current webhook
-		webhookToUpdate := WebHookPatch{
-			URL:          webhook.Config.URL,
-			Content_Type: webhook.Config.Content_Type,
-			Insecure_SSL: webhook.Config.Insecure_SSL,
-			Secret:       webhook.Config.Secret,
-		}
-		reader := GetReaderFromObject(webhookToUpdate)
+		// instantiate a Webhook struct for the response
 		webhookResponse := Webhook{}
+		// update the status and events
+		webhookToUpdate := WebHookUpdate{
+			Active: webhook.Active,
+			Events: webhook.Events,
+		}
+		readerUpdate := GetReaderFromObject(webhookToUpdate)
 		writeErr = dstRestClient.Patch(
 			fmt.Sprintf(
-				"repos/%s/%s/hooks/%d/config",
+				"repos/%s/%s/hooks/%d",
 				dstOrganization,
 				webhook.Repository,
 				webhook.ID,
 			),
-			reader,
+			readerUpdate,
 			&webhookResponse,
 		)
+		// only proceed if previous step didn't fail
+		if writeErr == nil {
+			// patch the config
+			webhookToPatch := WebHookPatch{
+				URL:          webhook.Config.URL,
+				Content_Type: webhook.Config.Content_Type,
+				Insecure_SSL: webhook.Config.Insecure_SSL,
+				Secret:       webhook.Config.Secret,
+			}
+			readerPatch := GetReaderFromObject(webhookToPatch)
+			writeErr = dstRestClient.Patch(
+				fmt.Sprintf(
+					"repos/%s/%s/hooks/%d/config",
+					dstOrganization,
+					webhook.Repository,
+					webhook.ID,
+				),
+				readerPatch,
+				&webhookResponse,
+			)
+		}
 	} else {
 		// create webhook
 		action = "post"
