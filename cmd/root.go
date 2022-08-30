@@ -756,7 +756,7 @@ func LookupWebhooks(repository Repository) {
 							"Found repository %s matching webhook URL '%s' in destination webhooks (ID: %d)!",
 							webhook.Repository,
 							webhook.Config.URL,
-							dstWebhook.DstID,
+							dstWebhook.ID,
 						),
 					)
 				}
