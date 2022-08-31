@@ -72,7 +72,7 @@ var (
 		Use:           "gh migrate-webhook-secrets",
 		Short:         "GitHub CLI extension to migrate webhook secrets",
 		Long:          `GitHub CLI extension to migrate webhook secrets. Supports HashiCorp Vault (KV V1 & V2) as the secret storage intermediary.`,
-		Version:       "0.3.1",
+		Version:       "0.3.3",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          CloneWebhooks,
@@ -964,9 +964,11 @@ func CreateOrUpdateWebhook(webhook Webhook) {
 	// determine whether to update or create
 	var action string
 	var writeErr error
+	var webhookIdToPing int
 	if webhook.Exists {
 		// update webhook
 		action = "patch"
+		webhookIdToPing = webhook.DstID
 		Debug(
 			fmt.Sprintf(
 				"Updating webhook %s in repo %s...",
@@ -995,13 +997,6 @@ func CreateOrUpdateWebhook(webhook Webhook) {
 		// only proceed if previous step didn't fail
 		if writeErr == nil {
 			// patch the config
-			webhookToPatch := WebHookPatch{
-				URL:          webhook.Config.URL,
-				Content_Type: webhook.Config.Content_Type,
-				Insecure_SSL: webhook.Config.Insecure_SSL,
-				Secret:       webhook.Config.Secret,
-			}
-			readerPatch := GetReaderFromObject(webhookToPatch)
 			writeErr = dstRestClient.Patch(
 				fmt.Sprintf(
 					"repos/%s/%s/hooks/%d/config",
@@ -1009,7 +1004,14 @@ func CreateOrUpdateWebhook(webhook Webhook) {
 					webhook.Repository,
 					webhook.DstID,
 				),
-				readerPatch,
+				GetReaderFromObject(
+					WebHookPatch{
+						URL:          webhook.Config.URL,
+						Content_Type: webhook.Config.Content_Type,
+						Insecure_SSL: webhook.Config.Insecure_SSL,
+						Secret:       webhook.Config.Secret,
+					},
+				),
 				&webhookResponse,
 			)
 		}
@@ -1023,7 +1025,6 @@ func CreateOrUpdateWebhook(webhook Webhook) {
 				webhook.Repository,
 			),
 		)
-		reader := GetReaderFromObject(webhook)
 		webhookResponse := Webhook{}
 		writeErr = dstRestClient.Post(
 			fmt.Sprintf(
@@ -1031,9 +1032,10 @@ func CreateOrUpdateWebhook(webhook Webhook) {
 				dstOrganization,
 				webhook.Repository,
 			),
-			reader,
+			GetReaderFromObject(webhook),
 			&webhookResponse,
 		)
+		webhookIdToPing = webhookResponse.ID
 	}
 
 	// validate the request worked.
@@ -1057,6 +1059,34 @@ func CreateOrUpdateWebhook(webhook Webhook) {
 				action,
 			),
 		)
+		// attempt to call ping endpoint
+		pingErr := dstRestClient.Post(
+			fmt.Sprintf(
+				"repos/%s/%s/hooks/%d/pings",
+				dstOrganization,
+				webhook.Repository,
+				webhookIdToPing,
+			),
+			GetReaderFromObject(nil),
+			nil,
+		)
+		if pingErr != nil {
+			Debug(
+				fmt.Sprintf(
+					"[ERROR] Webhook URL %s PING failed: %s",
+					webhook.Config.URL,
+					pingErr.Error(),
+				),
+			)
+		} else {
+			Debug(
+				fmt.Sprintf(
+					"Webhook URL %s PING succeeded.",
+					webhook.Config.URL,
+				),
+			)
+		}
+		// update number of successes
 		patchSucceeded++
 	}
 
